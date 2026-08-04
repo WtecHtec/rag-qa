@@ -438,7 +438,10 @@ export function useChatWorkspace(
   const stopGeneration = useCallback(() => {
     const conversationId = activeConversationRef.current;
     if (!conversationId) return;
-    streamSessionsRef.current.get(conversationId)?.controller.abort();
+    const session = streamSessionsRef.current.get(conversationId);
+    if (session) {
+      session.controller.abort();
+    }
   }, []);
 
   const saveFeedback = useCallback(async (
@@ -482,3 +485,5 @@ export function useChatWorkspace(
     saveFeedback,
   };
 }
+
+export type ChatWorkspace = ReturnType<typeof useChatWorkspace>;

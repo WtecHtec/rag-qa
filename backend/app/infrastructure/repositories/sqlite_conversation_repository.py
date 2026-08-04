@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import aiosqlite
 
@@ -100,12 +100,27 @@ class SqliteConversationRepository:
                     FOREIGN KEY (message_id) REFERENCES chat_messages(id) ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS retrieval_traces (
+                    id TEXT PRIMARY KEY,
+                    trace_id TEXT NOT NULL,
+                    query TEXT NOT NULL,
+                    rewritten_query TEXT,
+                    intent_category TEXT,
+                    retrieved_chunks_count INTEGER NOT NULL,
+                    top_score REAL,
+                    retrieval_latency_ms REAL NOT NULL,
+                    llm_latency_ms REAL,
+                    created_at TEXT NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_conversations_updated
                     ON conversations(updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_messages_conversation
                     ON chat_messages(conversation_id, created_at ASC, id ASC);
                 CREATE INDEX IF NOT EXISTS idx_citations_message
                     ON message_citations(message_id, citation_number ASC);
+                CREATE INDEX IF NOT EXISTS idx_traces_created
+                    ON retrieval_traces(created_at DESC);
                 """
             )
             message_columns = await (
@@ -222,18 +237,23 @@ class SqliteConversationRepository:
             )
             await connection.commit()
 
-    async def start_turn(
+    async def commit_turn(
         self,
         conversation: Conversation,
         user_message: ChatMessage,
         assistant_message: ChatMessage,
+        citations: Sequence[Citation],
     ) -> None:
-        """用户消息、占位回答与会话标题原子写入，避免只保存半个问答轮次。"""
+        """完整回答生成后原子写入整轮，任何中断都不会留下半成品。"""
         async with self._connect() as connection:
-            await connection.execute(
+            cursor = await connection.execute(
                 "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
                 (conversation.title, conversation.updated_at.isoformat(), str(conversation.id)),
             )
+            if cursor.rowcount == 0:
+                # 删除会话与流式收尾可能并发；会话已删除时直接放弃迟到结果。
+                await connection.rollback()
+                return
             await connection.executemany(
                 """
                 INSERT INTO chat_messages(
@@ -246,6 +266,18 @@ class SqliteConversationRepository:
                     self._message_parameters(assistant_message),
                 ],
             )
+            if citations:
+                await connection.executemany(
+                    """
+                    INSERT INTO message_citations(
+                        id, message_id, knowledge_base_id, document_id, parent_id,
+                        child_id, citation_number, document_name, heading_path,
+                        parent_content, child_preview, child_start_offset,
+                        child_end_offset, score
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [self._citation_parameters(citation) for citation in citations],
+                )
             await connection.commit()
 
     async def list_messages(self, conversation_id: UUID) -> Sequence[ChatMessage]:
@@ -341,11 +373,6 @@ class SqliteConversationRepository:
                 )
             await connection.commit()
 
-    async def update_message(self, message: ChatMessage) -> None:
-        async with self._connect() as connection:
-            await self._update_message(connection, message)
-            await connection.commit()
-
     async def save_feedback(
         self,
         message_id: UUID,
@@ -362,7 +389,50 @@ class SqliteConversationRepository:
                     reason = excluded.reason,
                     updated_at = excluded.updated_at
                 """,
-                (str(message_id), rating.value, reason, datetime.now().astimezone().isoformat()),
+                (
+                    str(message_id),
+                    rating.value,
+                    reason,
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+            await connection.commit()
+
+    async def save_retrieval_trace(
+        self,
+        *,
+        trace_id: str,
+        query: str,
+        rewritten_query: str | None,
+        intent_category: str | None,
+        retrieved_chunks_count: int,
+        top_score: float | None,
+        retrieval_latency_ms: float,
+        llm_latency_ms: float | None = None,
+    ) -> None:
+        async with self._connect() as connection:
+            now_str = datetime.now(UTC).isoformat()
+            row_id = str(uuid4())
+            await connection.execute(
+                """
+                INSERT INTO retrieval_traces(
+                    id, trace_id, query, rewritten_query, intent_category,
+                    retrieved_chunks_count, top_score, retrieval_latency_ms,
+                    llm_latency_ms, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row_id,
+                    trace_id,
+                    query,
+                    rewritten_query,
+                    intent_category,
+                    retrieved_chunks_count,
+                    top_score,
+                    retrieval_latency_ms,
+                    llm_latency_ms,
+                    now_str,
+                ),
             )
             await connection.commit()
 

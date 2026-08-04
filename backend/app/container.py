@@ -17,10 +17,12 @@ from app.infrastructure.storage.local_document_storage import LocalDocumentStora
 from app.infrastructure.vector_stores.lancedb_vector_store import LanceDbVectorStore
 from app.modules.chat.query_router import QueryRouter
 from app.modules.chat.service import ChatService
+from app.modules.diagnostics.service import DiagnosticsService
 from app.modules.documents.service import DocumentService
 from app.modules.knowledge_bases.service import KnowledgeBaseService
 from app.modules.memory.service import MemoryService
 from app.modules.retrieval.service import RetrievalService
+from app.modules.settings.service import SettingsService
 from app.providers.chunking.text_chunker import ParentChildTextChunker
 from app.providers.embedding.fastembed_embedding import FastEmbedEmbeddingProvider
 from app.providers.intent.llm_intent_classifier import LlmIntentClassifier
@@ -37,6 +39,8 @@ class AppContainer:
     document_service: DocumentService | None = None
     retrieval_service: RetrievalService | None = None
     chat_service: ChatService | None = None
+    diagnostics_service: DiagnosticsService | None = None
+    settings_service: SettingsService | None = None
     startup_hooks: tuple[StartupHook, ...] = field(default_factory=tuple)
 
     async def startup(self) -> None:
@@ -124,11 +128,16 @@ def build_default_container(settings: Settings) -> AppContainer:
         max_size_bytes=settings.max_document_size_bytes,
         indexer=retrieval_service,
     )
+    diagnostics_service = DiagnosticsService(settings)
+    settings_service = SettingsService(settings)
+
     return AppContainer(
         knowledge_base_service=service,
         document_service=document_service,
         retrieval_service=retrieval_service,
         chat_service=chat_service,
+        diagnostics_service=diagnostics_service,
+        settings_service=settings_service,
         startup_hooks=(
             repository.initialize,
             document_repository.initialize,
@@ -138,3 +147,4 @@ def build_default_container(settings: Settings) -> AppContainer:
             vector_migration.run,
         ),
     )
+

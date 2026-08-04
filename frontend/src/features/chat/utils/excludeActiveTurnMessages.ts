@@ -21,7 +21,10 @@ export function excludeActiveTurnMessages(
   let assistantIndex = -1;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
-    if (message?.role === "assistant" && message.status === "generating") {
+    if (
+      (message?.role === "assistant" || message?.role === "clarification")
+      && message.status === "generating"
+    ) {
       assistantIndex = index;
       break;
     }

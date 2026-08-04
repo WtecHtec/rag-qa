@@ -1,6 +1,5 @@
 import { useState } from "react";
 
-import { chatApi } from "./api/chatApi";
 import { ChatComposer } from "./components/ChatComposer";
 import { ChatErrorNotice } from "./components/ChatErrorNotice";
 import { ChatHeader } from "./components/ChatHeader";
@@ -8,10 +7,10 @@ import { CitationInspector } from "./components/CitationInspector";
 import { ConversationSidebar } from "./components/ConversationSidebar";
 import { DeleteConversationDialog } from "./components/DeleteConversationDialog";
 import { ChatTranscript } from "./components/ChatTranscript";
-import { useChatWorkspace } from "./hooks/useChatWorkspace";
+import { useChatWorkspaceContext } from "./hooks/useChatWorkspaceContext";
+import { ChatWorkspaceProvider } from "./providers/ChatWorkspaceProvider";
 import type { ChatGateway } from "./types/chat";
 import type { Conversation } from "./types/chat";
-import { knowledgeBaseApi } from "../knowledge-base/api/knowledgeBaseApi";
 import type { KnowledgeBaseGateway } from "../knowledge-base/types/knowledgeBase";
 import "./styles/chat.css";
 
@@ -21,10 +20,19 @@ interface ChatPageProps {
 }
 
 export function ChatPage({
-  gateway = chatApi,
-  knowledgeBaseGateway = knowledgeBaseApi,
+  gateway,
+  knowledgeBaseGateway,
 }: ChatPageProps) {
-  const workspace = useChatWorkspace(gateway, knowledgeBaseGateway);
+  return (
+    <ChatWorkspaceProvider gateway={gateway} knowledgeBaseGateway={knowledgeBaseGateway}>
+      <ChatPageContent />
+    </ChatWorkspaceProvider>
+  );
+}
+
+/** 视图只负责页面编排，流式连接的生命周期由页面级 Provider 管理。 */
+export function ChatPageContent() {
+  const workspace = useChatWorkspaceContext();
   const [deletingConversation, setDeletingConversation] = useState<Conversation | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const readyKnowledgeBases = workspace.knowledgeBases.filter(

@@ -1,5 +1,4 @@
 import sqlite3
-from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -77,7 +76,7 @@ async def test_legacy_scoped_conversation_is_migrated_without_losing_messages(
 
 
 @pytest.mark.asyncio
-async def test_stream_completion_after_conversation_delete_is_ignored(tmp_path: Path) -> None:
+async def test_turn_commit_after_conversation_delete_is_ignored(tmp_path: Path) -> None:
     """删除请求赢得竞态后，迟到的流式收尾不得写回消息或引用。"""
     repository = SqliteConversationRepository(tmp_path / "delete-race.db")
     await repository.initialize()
@@ -88,23 +87,17 @@ async def test_stream_completion_after_conversation_delete_is_ignored(tmp_path: 
         "问题", None, None, None, None, False, (), now, now,
     )
     assistant_message = ChatMessage(
-        uuid4(), conversation.id, MessageRole.ASSISTANT, MessageStatus.GENERATING,
-        "", None, "fake-model", None, None, True, (), now, now,
+        uuid4(), conversation.id, MessageRole.ASSISTANT, MessageStatus.COMPLETE,
+        "迟到回答 [1]", None, "fake-model", None, None, True, (), now, now,
     )
     await repository.add_conversation(conversation)
-    await repository.start_turn(conversation, user_message, assistant_message)
     await repository.delete_conversation(conversation.id)
-    completed = replace(
-        assistant_message,
-        status=MessageStatus.COMPLETE,
-        content="迟到回答 [1]",
-    )
     citation = Citation(
         uuid4(), assistant_message.id, uuid4(), uuid4(), uuid4(), uuid4(),
         1, "文档.md", "章节", "父块内容", "子块", 0, 2, 0.9,
     )
 
-    await repository.complete_message(completed, (citation,))
+    await repository.commit_turn(conversation, user_message, assistant_message, (citation,))
 
     assert await repository.get_conversation(conversation.id) is None
     assert await repository.get_message(assistant_message.id) is None

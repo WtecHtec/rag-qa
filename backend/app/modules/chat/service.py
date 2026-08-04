@@ -57,6 +57,8 @@ class PreparedAnswer:
     citations: tuple[Citation, ...]
     llm_messages: tuple[LlmMessage, ...]
     direct_answer: str | None
+    is_regeneration: bool = False
+    memory_content: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,28 +209,15 @@ class ChatService:
             )
         else:
             conversation = replace(conversation, updated_at=now)
-        await self._repository.start_turn(conversation, user_message, assistant_message)
         if memory_content is not None and self._memory_service is not None:
-            remembered = await self._memory_service.remember(
-                memory_content,
-                conversation_id=conversation.id,
-                message_id=user_message.id,
-            )
-            self._logger.info(
-                "memory.explicitly_saved",
-                extra={
-                    "conversation_id": str(conversation.id),
-                    "message_id": str(user_message.id),
-                    "memory_key": remembered.memory_key,
-                },
-            )
             return PreparedAnswer(
                 conversation,
                 user_message,
                 assistant_message,
                 (),
                 (),
-                f"好的，已记住：{remembered.content}",
+                f"好的，已记住：{memory_content}",
+                memory_content=memory_content,
             )
         if assistant_role is MessageRole.CLARIFICATION:
             direct_answer = (
@@ -258,18 +247,14 @@ class ChatService:
                 ),
                 None,
             )
-        try:
-            return await self._prepare_with_retrieval(
-                conversation,
-                user_message,
-                assistant_message,
-                history,
-                query_plan.retrieval_query,
-                await self._prompt_memories(),
-            )
-        except Exception as error:
-            await self._fail_preparation(assistant_message, error)
-            raise
+        return await self._prepare_with_retrieval(
+            conversation,
+            user_message,
+            assistant_message,
+            history,
+            query_plan.retrieval_query,
+            await self._prompt_memories(),
+        )
 
     async def prepare_regeneration(
         self,
@@ -342,7 +327,6 @@ class ChatService:
             citations=(),
             updated_at=self._clock(),
         )
-        await self._repository.complete_message(generating, ())
         if memory_content is not None:
             return PreparedAnswer(
                 conversation,
@@ -351,6 +335,7 @@ class ChatService:
                 (),
                 (),
                 f"好的，已记住：{memory_content}",
+                True,
             )
         if query_plan.intent in (
             QueryIntent.CLARIFICATION,
@@ -368,6 +353,7 @@ class ChatService:
                 (),
                 (),
                 direct_answer,
+                True,
             )
         if query_plan.intent is QueryIntent.GENERAL:
             memories = await self._prompt_memories()
@@ -382,19 +368,17 @@ class ChatService:
                     memories=memories,
                 ),
                 None,
+                True,
             )
-        try:
-            return await self._prepare_with_retrieval(
-                conversation,
-                user_message,
-                generating,
-                messages[:user_index],
-                query_plan.retrieval_query,
-                await self._prompt_memories(),
-            )
-        except Exception as error:
-            await self._fail_preparation(generating, error)
-            raise
+        return await self._prepare_with_retrieval(
+            conversation,
+            user_message,
+            generating,
+            messages[:user_index],
+            query_plan.retrieval_query,
+            await self._prompt_memories(),
+            is_regeneration=True,
+        )
 
     async def stream_answer(
         self,
@@ -424,26 +408,27 @@ class ChatService:
                 citations=cited_sources,
                 updated_at=self._clock(),
             )
-            await self._repository.complete_message(completed, cited_sources)
+            await self._remember_completed_turn(prepared)
+            if prepared.is_regeneration:
+                await self._repository.complete_message(completed, cited_sources)
+            else:
+                # 首次问答只在完整生成后原子提交，取消请求不会留下半轮消息。
+                await self._repository.commit_turn(
+                    prepared.conversation,
+                    prepared.user_message,
+                    completed,
+                    cited_sources,
+                )
             yield AnswerStreamEvent(
                 "done",
                 message=completed,
                 citations=cited_sources,
             )
         except asyncio.CancelledError:
-            partial_content = "".join(parts).strip()
-            cited_sources = select_cited_sources(partial_content, prepared.citations)
-            stopped = replace(
-                prepared.assistant_message,
-                status=MessageStatus.STOPPED,
-                content=partial_content,
-                citations=cited_sources,
-                updated_at=self._clock(),
-            )
-            await self._repository.complete_message(stopped, cited_sources)
+            # 主动停止、切换路由或刷新都视为放弃本轮，不保存用户问题和部分回答。
             self._logger.info(
                 "chat.generation_stopped",
-                extra={"message_id": str(stopped.id)},
+                extra={"message_id": str(prepared.assistant_message.id)},
             )
             raise
         except Exception as error:
@@ -460,7 +445,6 @@ class ChatService:
                 citations=cited_sources,
                 updated_at=self._clock(),
             )
-            await self._repository.complete_message(failed, cited_sources)
             self._logger.exception(
                 "chat.generation_failed",
                 extra={"message_id": str(failed.id), "error_code": failed.error_code},
@@ -496,15 +480,43 @@ class ChatService:
         history: Sequence[ChatMessage],
         retrieval_query: str,
         memories: Sequence[str],
+        *,
+        is_regeneration: bool = False,
     ) -> PreparedAnswer:
+        import time
+        start_time = time.perf_counter()
         result = await self._retrieval_service.search_all(
             retrieval_query,
             top_k=self._rag_top_k,
         )
+        retrieval_latency = round((time.perf_counter() - start_time) * 1000, 2)
         citations = await self._build_citations(
             assistant_message.id,
             result,
         )
+        top_score = (
+            citations[0].score
+            if citations
+            else (result.matches[0].score if result.matches else None)
+        )
+        trace_id = f"trc-{str(assistant_message.id)[:8]}"
+        try:
+            await self._repository.save_retrieval_trace(
+                trace_id=trace_id,
+                query=user_message.content,
+                rewritten_query=(
+                    retrieval_query
+                    if retrieval_query != user_message.content
+                    else None
+                ),
+                intent_category="Detail" if citations else "General",
+                retrieved_chunks_count=len(citations),
+                top_score=top_score,
+                retrieval_latency_ms=retrieval_latency,
+            )
+        except Exception as e:
+            self._logger.warning("save_retrieval_trace.failed: %s", e)
+
         if not citations:
             return PreparedAnswer(
                 conversation,
@@ -517,6 +529,7 @@ class ChatService:
                     memories=memories,
                 ),
                 None,
+                is_regeneration,
             )
         llm_messages = build_llm_messages(
             history,
@@ -531,8 +544,8 @@ class ChatService:
             citations,
             llm_messages,
             None,
+            is_regeneration,
         )
-
     async def _build_citations(
         self,
         message_id: UUID,
@@ -571,17 +584,23 @@ class ChatService:
             return ()
         return await self._memory_service.list_prompt_contents()
 
-    async def _fail_preparation(self, message: ChatMessage, error: Exception) -> None:
-        failed = replace(
-            message,
-            status=MessageStatus.FAILED,
-            error_code=error.code if isinstance(error, ChatError) else "rag_preparation_failed",
-            error_message=(
-                error.message if isinstance(error, ChatError) else "检索上下文准备失败，请查看日志"
-            ),
-            updated_at=self._clock(),
+    async def _remember_completed_turn(self, prepared: PreparedAnswer) -> None:
+        """显式记忆也随完整轮次提交，中断回复不能提前产生长期副作用。"""
+        if prepared.memory_content is None or self._memory_service is None:
+            return
+        remembered = await self._memory_service.remember(
+            prepared.memory_content,
+            conversation_id=prepared.conversation.id,
+            message_id=prepared.user_message.id,
         )
-        await self._repository.update_message(failed)
+        self._logger.info(
+            "memory.explicitly_saved",
+            extra={
+                "conversation_id": str(prepared.conversation.id),
+                "message_id": str(prepared.user_message.id),
+                "memory_key": remembered.memory_key,
+            },
+        )
 
     def _new_message(
         self,

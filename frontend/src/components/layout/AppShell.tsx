@@ -7,6 +7,7 @@ const navigation: Array<{ to: string; label: string; icon: IconName }> = [
   { to: "/overview", label: "概览", icon: "home" },
   { to: "/knowledge-bases", label: "知识库", icon: "library" },
   { to: "/chat", label: "问答", icon: "chat" },
+  { to: "/analytics", label: "链路追踪", icon: "layers" },
   { to: "/diagnostics", label: "诊断", icon: "diagnostics" },
 ];
 

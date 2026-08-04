@@ -211,6 +211,67 @@ def test_llm_memory_candidate_requests_explicit_authorization(tmp_path: Path) ->
     assert llm.requests == []
 
 
+def test_interrupted_stream_does_not_persist_partial_turn(tmp_path: Path) -> None:
+    application, _, _ = build_chat_test_app(tmp_path)
+
+    with TestClient(application) as client:
+        conversation = client.post("/api/v1/conversations").json()
+        service = application.state.container.chat_service
+        assert service is not None
+        assert client.portal is not None
+
+        async def interrupt_after_first_delta() -> None:
+            prepared = await service.prepare_answer(
+                UUID(conversation["id"]),
+                "这条回答会在生成中被取消",
+            )
+            events = service.stream_answer(prepared)
+            await anext(events)
+            await anext(events)
+            await events.aclose()
+
+        client.portal.call(interrupt_after_first_delta)
+        messages = client.get(
+            f"/api/v1/conversations/{conversation['id']}/messages"
+        ).json()["items"]
+
+    assert messages == []
+
+
+def test_interrupted_regeneration_keeps_previous_answer(tmp_path: Path) -> None:
+    application, _, _ = build_chat_test_app(tmp_path)
+
+    with TestClient(application) as client:
+        conversation = client.post("/api/v1/conversations").json()
+        client.post(
+            f"/api/v1/conversations/{conversation['id']}/messages/stream",
+            json={"content": "保留原回答"},
+        )
+        original = client.get(
+            f"/api/v1/conversations/{conversation['id']}/messages"
+        ).json()["items"][-1]
+        service = application.state.container.chat_service
+        assert service is not None
+        assert client.portal is not None
+
+        async def interrupt_after_first_delta() -> None:
+            prepared = await service.prepare_regeneration(
+                UUID(conversation["id"]),
+                UUID(original["id"]),
+            )
+            events = service.stream_answer(prepared)
+            await anext(events)
+            await anext(events)
+            await events.aclose()
+
+        client.portal.call(interrupt_after_first_delta)
+        refreshed = client.get(
+            f"/api/v1/conversations/{conversation['id']}/messages"
+        ).json()["items"][-1]
+
+    assert refreshed == original
+
+
 def test_stream_chat_persists_messages_citations_feedback_and_regeneration(
     tmp_path: Path,
 ) -> None:
@@ -337,7 +398,7 @@ def test_knowledge_query_falls_back_to_general_llm_when_retrieval_is_empty(
     assert messages[-1]["citations"] == []
 
 
-def test_stream_error_keeps_failed_message_snapshot_and_separate_error_text(
+def test_stream_error_is_reported_but_incomplete_turn_is_not_persisted(
     tmp_path: Path,
 ) -> None:
     application, _, _ = build_chat_test_app(tmp_path, FailingLlmProvider())
@@ -357,8 +418,7 @@ def test_stream_error_keeps_failed_message_snapshot_and_separate_error_text(
     assert 'event: error' in streamed.text
     assert '"error_message": "上游模型暂时不可用"' in streamed.text
     assert '"message": {' in streamed.text
-    assert messages[-1]["status"] == "failed"
-    assert messages[-1]["content"] == "已生成的部分内容"
+    assert messages == []
 
 
 def test_only_latest_assistant_answer_can_be_regenerated(tmp_path: Path) -> None:

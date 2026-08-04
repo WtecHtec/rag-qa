@@ -16,11 +16,12 @@ class ConversationRepository(Protocol):
     async def list_conversations(self, *, limit: int, offset: int) -> Sequence[Conversation]: ...
     async def count_conversations(self) -> int: ...
     async def delete_conversation(self, conversation_id: UUID) -> None: ...
-    async def start_turn(
+    async def commit_turn(
         self,
         conversation: Conversation,
         user_message: ChatMessage,
         assistant_message: ChatMessage,
+        citations: Sequence[Citation],
     ) -> None: ...
     async def list_messages(self, conversation_id: UUID) -> Sequence[ChatMessage]: ...
     async def list_message_page(
@@ -37,10 +38,21 @@ class ConversationRepository(Protocol):
         message: ChatMessage,
         citations: Sequence[Citation],
     ) -> None: ...
-    async def update_message(self, message: ChatMessage) -> None: ...
     async def save_feedback(
         self,
         message_id: UUID,
         rating: FeedbackRating,
         reason: str | None,
+    ) -> None: ...
+    async def save_retrieval_trace(
+        self,
+        *,
+        trace_id: str,
+        query: str,
+        rewritten_query: str | None,
+        intent_category: str | None,
+        retrieved_chunks_count: int,
+        top_score: float | None,
+        retrieval_latency_ms: float,
+        llm_latency_ms: float | None = None,
     ) -> None: ...
