@@ -1,0 +1,28 @@
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Backend
+backend/.venv/
+backend/.pytest_cache/
+backend/.ruff_cache/
+backend/**/__pycache__/
+backend/**/*.py[cod]
+
+# Local configuration and runtime data
+.env
+frontend/.env.local
+backend/.env
+data/
+backend/data/
+logs/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+**/*.test.tsx
+**/*.test.ts
+**/__init__.py
+prototype

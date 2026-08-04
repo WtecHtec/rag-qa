@@ -1,0 +1,18 @@
+Metadata-Version: 2.4
+Name: biyou-backend
+Version: 0.1.0
+Summary: BiYou local document Q&A backend
+Requires-Python: >=3.11
+Requires-Dist: aiosqlite<1,>=0.21
+Requires-Dist: fastapi<1,>=0.115
+Requires-Dist: fastembed<1,>=0.7
+Requires-Dist: lancedb<1,>=0.25
+Requires-Dist: langchain<2,>=1.0
+Requires-Dist: langchain-openai<2,>=1.0
+Requires-Dist: pydantic-settings<3,>=2.7
+Requires-Dist: uvicorn[standard]<1,>=0.34
+Provides-Extra: dev
+Requires-Dist: httpx<1,>=0.28; extra == "dev"
+Requires-Dist: pytest<9,>=8; extra == "dev"
+Requires-Dist: pytest-asyncio<1,>=0.25; extra == "dev"
+Requires-Dist: ruff<1,>=0.9; extra == "dev"

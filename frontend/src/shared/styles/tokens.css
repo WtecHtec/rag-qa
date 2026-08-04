@@ -1,0 +1,20 @@
+:root {
+  color-scheme: light;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  --color-background: #f4f5f7;
+  --color-surface: rgba(255, 255, 255, 0.78);
+  --color-surface-solid: #ffffff;
+  --color-sidebar: rgba(239, 241, 244, 0.86);
+  --color-text: #16181d;
+  --color-muted: #6d727c;
+  --color-line: rgba(26, 31, 38, 0.09);
+  --color-accent: #2477f3;
+  --color-success: #2e9f66;
+  --shadow-panel: 0 1px 2px rgba(20, 24, 30, 0.05), 0 8px 24px rgba(20, 24, 30, 0.04);
+  --radius-small: 10px;
+  --radius-medium: 14px;
+  --radius-large: 20px;
+}
+
