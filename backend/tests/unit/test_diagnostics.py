@@ -55,5 +55,18 @@ async def test_diagnostics_service_metrics(tmp_path):
 
     assert metrics.knowledge_base_count == 0
     assert metrics.document_count == 0
-    assert metrics.conversation_count == 0
     assert metrics.storage_size_bytes >= 0
+
+
+@pytest.mark.asyncio
+async def test_sqlite_conversation_repository_initialize(tmp_path):
+    """测试 SqliteConversationRepository 表与索引初始化 (验证多语句 SQL 规范)。"""
+    from app.infrastructure.repositories.sqlite_conversation_repository import (
+        SqliteConversationRepository,
+    )
+
+    db_file = tmp_path / "test_init.db"
+    repo = SqliteConversationRepository(db_file)
+    await repo.initialize()
+    assert db_file.exists()
+

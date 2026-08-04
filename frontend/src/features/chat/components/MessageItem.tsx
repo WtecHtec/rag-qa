@@ -71,7 +71,11 @@ export const MessageItem = memo(function MessageItem({
             ) : null}
             <span />
             {message.role === "assistant" ? (
-              <MessageFeedback messageId={message.id} onFeedback={onFeedback} />
+              <MessageFeedback
+                messageId={message.id}
+                initialRating={message.feedback_rating}
+                onFeedback={onFeedback}
+              />
             ) : null}
           </div>
         ) : null}

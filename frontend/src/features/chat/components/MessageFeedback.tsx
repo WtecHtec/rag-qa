@@ -8,11 +8,12 @@ const DOWN_REASONS = ["回答错误", "内容不完整", "引用错误", "没解
 
 interface MessageFeedbackProps {
   messageId: string;
+  initialRating?: "up" | "down" | null;
   onFeedback: (messageId: string, rating: "up" | "down", reason?: string) => void;
 }
 
-export function MessageFeedback({ messageId, onFeedback }: MessageFeedbackProps) {
-  const [selected, setSelected] = useState<"up" | "down" | null>(null);
+export function MessageFeedback({ messageId, initialRating, onFeedback }: MessageFeedbackProps) {
+  const [selected, setSelected] = useState<"up" | "down" | null>(initialRating ?? null);
   const menuId = useId();
   const menu = useFeedbackMenu();
 

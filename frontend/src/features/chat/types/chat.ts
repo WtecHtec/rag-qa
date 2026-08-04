@@ -44,6 +44,8 @@ export interface ChatMessage {
   error_message?: string | null;
   rag_enabled: boolean;
   citations: Citation[];
+  feedback_rating?: "up" | "down" | null;
+  feedback_reason?: string | null;
   created_at: string;
   updated_at: string;
 }

@@ -56,6 +56,9 @@ class ChatMessage:
     citations: tuple[Citation, ...]
     created_at: datetime
     updated_at: datetime
+    feedback_rating: FeedbackRating | None = None
+    feedback_reason: str | None = None
+    is_regenerate: bool = False
 
 
 @dataclass(frozen=True, slots=True)

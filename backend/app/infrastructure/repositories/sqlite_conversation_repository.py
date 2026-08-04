@@ -67,6 +67,7 @@ class SqliteConversationRepository:
                     error_code TEXT,
                     error_message TEXT,
                     rag_enabled INTEGER NOT NULL DEFAULT 0,
+                    is_regenerate INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY (conversation_id)
@@ -146,6 +147,28 @@ class SqliteConversationRepository:
                     "ALTER TABLE chat_messages "
                     "ADD COLUMN rag_enabled INTEGER NOT NULL DEFAULT 0"
                 )
+            if not any(column[1] == "is_regenerate" for column in message_columns):
+                await connection.execute(
+                    "ALTER TABLE chat_messages "
+                    "ADD COLUMN is_regenerate INTEGER NOT NULL DEFAULT 0"
+                )
+
+            await connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS feedback_audit_logs (
+                    id TEXT PRIMARY KEY,
+                    message_id TEXT NOT NULL,
+                    conversation_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    rating TEXT,
+                    reason TEXT,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_audit_logs_created
+                    ON feedback_audit_logs(created_at DESC);
+                """
+            )
+
             citation_columns = await (
                 await connection.execute("PRAGMA table_info(message_citations)")
             ).fetchall()
@@ -272,14 +295,32 @@ class SqliteConversationRepository:
                 """
                 INSERT INTO chat_messages(
                     id, conversation_id, role, status, content, rewritten_query,
-                    model, error_code, error_message, rag_enabled, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    model, error_code, error_message, rag_enabled, is_regenerate, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     self._message_parameters(user_message),
                     self._message_parameters(assistant_message),
                 ],
             )
+            if assistant_message.is_regenerate:
+                audit_id = str(uuid4())
+                await connection.execute(
+                    """
+                    INSERT INTO feedback_audit_logs(
+                        id, message_id, conversation_id, event_type, rating, reason, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        audit_id,
+                        str(assistant_message.id),
+                        str(assistant_message.conversation_id),
+                        "regeneration",
+                        None,
+                        None,
+                        datetime.now(UTC).isoformat(),
+                    ),
+                )
             if citations:
                 await connection.executemany(
                     """
@@ -299,8 +340,11 @@ class SqliteConversationRepository:
             rows = await (
                 await connection.execute(
                     """
-                    SELECT * FROM chat_messages WHERE conversation_id = ?
-                    ORDER BY created_at ASC, rowid ASC
+                    SELECT m.*, f.rating AS feedback_rating, f.reason AS feedback_reason
+                    FROM chat_messages m
+                    LEFT JOIN message_feedback f ON f.message_id = m.id
+                    WHERE m.conversation_id = ?
+                    ORDER BY m.created_at ASC, m.rowid ASC
                     """,
                     (str(conversation_id),),
                 )
@@ -323,8 +367,11 @@ class SqliteConversationRepository:
             rows = await (
                 await connection.execute(
                     """
-                    SELECT * FROM chat_messages WHERE conversation_id = ?
-                    ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?
+                    SELECT m.*, f.rating AS feedback_rating, f.reason AS feedback_reason
+                    FROM chat_messages m
+                    LEFT JOIN message_feedback f ON f.message_id = m.id
+                    WHERE m.conversation_id = ?
+                    ORDER BY m.created_at DESC, m.rowid DESC LIMIT ? OFFSET ?
                     """,
                     (str(conversation_id), limit, offset),
                 )
@@ -350,7 +397,13 @@ class SqliteConversationRepository:
         async with self._connect() as connection:
             row = await (
                 await connection.execute(
-                    "SELECT * FROM chat_messages WHERE id = ?", (str(message_id),)
+                    """
+                    SELECT m.*, f.rating AS feedback_rating, f.reason AS feedback_reason
+                    FROM chat_messages m
+                    LEFT JOIN message_feedback f ON f.message_id = m.id
+                    WHERE m.id = ?
+                    """,
+                    (str(message_id),),
                 )
             ).fetchone()
             if row is None:
@@ -369,6 +422,24 @@ class SqliteConversationRepository:
                 # 删除会话与流式收尾可能并发；父消息已级联删除时不得重新插入引用。
                 await connection.rollback()
                 return
+            if message.is_regenerate:
+                audit_id = str(uuid4())
+                await connection.execute(
+                    """
+                    INSERT INTO feedback_audit_logs(
+                        id, message_id, conversation_id, event_type, rating, reason, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        audit_id,
+                        str(message.id),
+                        str(message.conversation_id),
+                        "regeneration",
+                        None,
+                        None,
+                        datetime.now(UTC).isoformat(),
+                    ),
+                )
             await connection.execute(
                 "DELETE FROM message_citations WHERE message_id = ?",
                 (str(message.id),),
@@ -394,6 +465,12 @@ class SqliteConversationRepository:
         reason: str | None,
     ) -> None:
         async with self._connect() as connection:
+            msg_cursor = await connection.execute(
+                "SELECT conversation_id FROM chat_messages WHERE id = ?", (str(message_id),)
+            )
+            msg_row = await msg_cursor.fetchone()
+            conv_id = msg_row["conversation_id"] if msg_row else ""
+
             await connection.execute(
                 """
                 INSERT INTO message_feedback(message_id, rating, reason, updated_at)
@@ -405,6 +482,24 @@ class SqliteConversationRepository:
                 """,
                 (
                     str(message_id),
+                    rating.value,
+                    reason,
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+
+            audit_id = str(uuid4())
+            await connection.execute(
+                """
+                INSERT INTO feedback_audit_logs(
+                    id, message_id, conversation_id, event_type, rating, reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    audit_id,
+                    str(message_id),
+                    conv_id,
+                    "feedback",
                     rating.value,
                     reason,
                     datetime.now(UTC).isoformat(),
@@ -491,7 +586,7 @@ class SqliteConversationRepository:
         cursor = await connection.execute(
             """
             UPDATE chat_messages SET status = ?, content = ?, rewritten_query = ?,
-                model = ?, error_code = ?, error_message = ?, rag_enabled = ?, updated_at = ?
+                model = ?, error_code = ?, error_message = ?, rag_enabled = ?, is_regenerate = ?, updated_at = ?
             WHERE id = ?
             """,
             (
@@ -502,6 +597,7 @@ class SqliteConversationRepository:
                 message.error_code,
                 message.error_message,
                 int(message.rag_enabled),
+                int(message.is_regenerate),
                 message.updated_at.isoformat(),
                 str(message.id),
             ),
@@ -560,6 +656,7 @@ class SqliteConversationRepository:
             message.error_code,
             message.error_message,
             int(message.rag_enabled),
+            int(message.is_regenerate),
             message.created_at.isoformat(),
             message.updated_at.isoformat(),
         )
@@ -597,6 +694,10 @@ class SqliteConversationRepository:
         row: aiosqlite.Row,
         citations: Sequence[Citation],
     ) -> ChatMessage:
+        row_keys = row.keys()
+        raw_rating = row["feedback_rating"] if "feedback_rating" in row_keys else None
+        raw_reason = row["feedback_reason"] if "feedback_reason" in row_keys else None
+        raw_regen = row["is_regenerate"] if "is_regenerate" in row_keys else 0
         return ChatMessage(
             id=UUID(row["id"]),
             conversation_id=UUID(row["conversation_id"]),
@@ -611,6 +712,9 @@ class SqliteConversationRepository:
             citations=tuple(citations),
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
+            feedback_rating=FeedbackRating(raw_rating) if raw_rating else None,
+            feedback_reason=raw_reason,
+            is_regenerate=bool(raw_regen) if raw_regen else False,
         )
 
     @staticmethod

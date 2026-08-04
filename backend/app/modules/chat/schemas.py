@@ -74,6 +74,8 @@ class ChatMessageResponse(BaseModel):
     citations: list[CitationResponse]
     created_at: datetime
     updated_at: datetime
+    feedback_rating: str | None = None
+    feedback_reason: str | None = None
 
     @classmethod
     def from_message(cls, message: ChatMessage) -> "ChatMessageResponse":
@@ -91,6 +93,8 @@ class ChatMessageResponse(BaseModel):
             citations=[CitationResponse.from_citation(item) for item in message.citations],
             created_at=message.created_at,
             updated_at=message.updated_at,
+            feedback_rating=message.feedback_rating.value if message.feedback_rating else None,
+            feedback_reason=message.feedback_reason,
         )
 
 

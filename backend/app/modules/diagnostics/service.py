@@ -208,21 +208,40 @@ class DiagnosticsService:
             try:
                 with sqlite3.connect(self._db_path) as conn:
                     cursor = conn.cursor()
-                    # 统计 rating
-                    cursor.execute("SELECT rating, reason FROM message_feedback")
-                    rows = cursor.fetchall()
-                    total_feedbacks = len(rows)
-                    for rating, reason in rows:
-                        if rating == "up":
-                            up_count += 1
-                        elif rating == "down":
-                            down_count += 1
-                            r_key = reason.strip() if reason and reason.strip() else "其他"
-                            reason_counts[r_key] = reason_counts.get(r_key, 0) + 1
+                    cursor.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'feedback_audit_logs'"
+                    )
+                    if cursor.fetchone():
+                        cursor.execute("SELECT rating, reason, event_type FROM feedback_audit_logs")
+                        rows = cursor.fetchall()
+                        for rating, reason, event_type in rows:
+                            if event_type == "regeneration":
+                                regeneration_count += 1
+                            elif event_type == "feedback":
+                                total_feedbacks += 1
+                                if rating == "up":
+                                    up_count += 1
+                                elif rating == "down":
+                                    down_count += 1
+                                    r_key = reason.strip() if reason and reason.strip() else "其他"
+                                    reason_counts[r_key] = reason_counts.get(r_key, 0) + 1
+                    else:
+                        cursor.execute("SELECT rating, reason FROM message_feedback")
+                        rows = cursor.fetchall()
+                        total_feedbacks = len(rows)
+                        for rating, reason in rows:
+                            if rating == "up":
+                                up_count += 1
+                            elif rating == "down":
+                                down_count += 1
+                                r_key = reason.strip() if reason and reason.strip() else "其他"
+                                reason_counts[r_key] = reason_counts.get(r_key, 0) + 1
 
-                    # 统计重新生成次数 (is_regenerate = 1)
-                    cursor.execute("SELECT COUNT(*) FROM messages WHERE is_regenerate = 1")
-                    regeneration_count = cursor.fetchone()[0] or 0
+                        cursor.execute(
+                            "SELECT COUNT(*) FROM chat_messages WHERE is_regenerate = 1"
+                        )
+                        reg_row = cursor.fetchone()
+                        regeneration_count = reg_row[0] if reg_row else 0
             except sqlite3.Error:
                 pass
 
