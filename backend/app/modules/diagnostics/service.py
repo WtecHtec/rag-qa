@@ -152,16 +152,19 @@ class DiagnosticsService:
                     doc_count = row[0] or 0
                     ready_doc_count = row[1] or 0
 
-                    # 向量 Chunk 数
-                    cursor.execute("SELECT COUNT(*) FROM document_chunks")
-                    chunks_count = cursor.fetchone()[0]
+                    # 向量 Chunk 数 (统计参与向量索引的 Child Chunk 数量，与知识库管理统计对齐)
+                    cursor.execute("SELECT COUNT(*) FROM text_chunks WHERE kind = 'child'")
+                    chunks_row = cursor.fetchone()
+                    chunks_count = chunks_row[0] if chunks_row and chunks_row[0] is not None else 0
 
                     # 会话数与消息数
                     cursor.execute("SELECT COUNT(*) FROM conversations")
-                    conv_count = cursor.fetchone()[0]
+                    conv_row = cursor.fetchone()
+                    conv_count = conv_row[0] if conv_row and conv_row[0] is not None else 0
 
-                    cursor.execute("SELECT COUNT(*) FROM messages")
-                    msg_count = cursor.fetchone()[0]
+                    cursor.execute("SELECT COUNT(*) FROM chat_messages")
+                    msg_row = cursor.fetchone()
+                    msg_count = msg_row[0] if msg_row and msg_row[0] is not None else 0
             except sqlite3.Error:
                 pass
 
