@@ -15,7 +15,10 @@ export function useBrowserPath(fallbackPath: string) {
   }, [fallbackPath]);
 
   const navigate = useCallback((nextPath: string) => {
-    if (window.location.pathname !== nextPath) window.history.pushState(null, "", nextPath);
+    if (window.location.pathname !== nextPath) {
+      window.history.pushState(null, "", nextPath);
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    }
     setPathname(nextPath);
   }, []);
 

@@ -22,11 +22,12 @@ const routes: Record<string, ReactNode> = {
 interface AppRouterProps {
   chatGateway?: ChatGateway;
   knowledgeBaseGateway?: KnowledgeBaseGateway;
+  onNavigate?: (path: string) => void;
 }
 
 export function resolveAppRoute(
   pathname: string,
-  { chatGateway, knowledgeBaseGateway }: AppRouterProps = {},
+  { chatGateway, knowledgeBaseGateway, onNavigate }: AppRouterProps = {},
 ): ReactNode {
   if (pathname === "/chat") {
     return (
@@ -36,14 +37,17 @@ export function resolveAppRoute(
       />
     );
   }
-  return routes[pathname] ?? routes["/overview"];
+  if (pathname === "/overview" || !routes[pathname]) {
+    return <OverviewPage onNavigate={onNavigate} />;
+  }
+  return routes[pathname];
 }
 
 export function AppRouter(props: AppRouterProps) {
   const { pathname, navigate } = useBrowserPath("/overview");
   return (
     <AppShell currentPath={pathname} onNavigate={navigate}>
-      {resolveAppRoute(pathname, props)}
+      {resolveAppRoute(pathname, { ...props, onNavigate: navigate })}
     </AppShell>
   );
 }

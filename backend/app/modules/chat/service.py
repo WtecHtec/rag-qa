@@ -346,6 +346,7 @@ class ChatService:
             rag_enabled=query_plan.use_rag,
             citations=(),
             updated_at=self._clock(),
+            is_regenerate=True,
         )
         if memory_content is not None:
             return PreparedAnswer(

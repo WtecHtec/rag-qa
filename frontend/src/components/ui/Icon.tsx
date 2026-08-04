@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 
 export type IconName =
   | "alert"
+  | "arrow"
   | "chat"
   | "check"
   | "chevron"
@@ -34,6 +35,7 @@ interface IconProps {
 
 const paths: Record<IconName, ReactNode> = {
   alert: <><path d="M12 4 3.5 19h17L12 4Z"/><path d="M12 9v4M12 16h.01"/></>,
+  arrow: <path d="m9 18 6-6-6-6" />,
   chat: <><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8a2.5 2.5 0 0 1-2.5 2.5H10l-5 4v-4.8A2.5 2.5 0 0 1 4 13.2Z"/><path d="M8 8h8M8 12h5"/></>,
   check: <path d="m5 12 4 4L19 6" />,
   chevron: <path d="m9 18 6-6-6-6" />,
