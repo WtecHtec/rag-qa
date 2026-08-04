@@ -64,3 +64,30 @@ async def test_settings_service_test_llm_connection(tmp_path):
     res = await service.test_llm_connection(test_req)
     assert isinstance(res.success, bool)
     assert res.message is not None
+
+
+@pytest.mark.asyncio
+async def test_settings_service_hot_reload_llm(tmp_path):
+    """测试设置更新时对 ChatService 运行期 LlmProvider 执行热更新。"""
+    from unittest.mock import MagicMock
+    from app.modules.chat.service import ChatService
+
+    settings = Settings(
+        llm_provider="openai_compatible",
+        llm_model="Qwen/Qwen3-8B",
+    )
+    chat_service_mock = MagicMock(spec=ChatService)
+
+    service = SettingsService(settings, chat_service=chat_service_mock)
+
+    update_payload = SystemSettingsUpdate(
+        llm=LlmConfig(
+            provider="openai_compatible",
+            model="deepseek-ai/DeepSeek-V3",
+        )
+    )
+    await service.update_settings(update_payload)
+
+    assert chat_service_mock.set_llm_provider.called
+    assert chat_service_mock.set_query_router.called
+

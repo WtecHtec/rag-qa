@@ -5,11 +5,13 @@
 
 import logging
 import time
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from pydantic import SecretStr
 
 from app.core.config import Settings
+from app.modules.chat.query_router import QueryRouter
 from app.modules.settings.schemas import (
     ChunkingConfig,
     EmbeddingConfig,
@@ -20,7 +22,11 @@ from app.modules.settings.schemas import (
     SystemSettingsRead,
     SystemSettingsUpdate,
 )
+from app.providers.intent.llm_intent_classifier import LlmIntentClassifier
 from app.providers.llm.factory import LlmProviderFactory, LlmRuntimeConfig
+
+if TYPE_CHECKING:
+    from app.modules.chat.service import ChatService
 
 
 def mask_secret(secret: str | None) -> str | None:
@@ -34,14 +40,16 @@ def mask_secret(secret: str | None) -> str | None:
 
 
 class SettingsService:
-    """系统设置业务服务，解耦数据读取与配置更新。"""
+    """系统设置业务服务，解耦数据读取、热更新与配置持久化。"""
 
     def __init__(
         self,
         settings: Settings,
+        chat_service: "ChatService | None" = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._settings = settings
+        self._chat_service = chat_service
         self._logger = logger or logging.getLogger(__name__)
 
     async def get_settings(self) -> SystemSettingsRead:
@@ -93,7 +101,7 @@ class SettingsService:
     async def update_settings(
         self, payload: SystemSettingsUpdate
     ) -> SystemSettingsRead:
-        """增量更新运行期系统配置。"""
+        """增量更新运行期系统配置，同步对问答服务执行热更新并落盘至 .env。"""
         if payload.llm:
             if payload.llm.provider:
                 self._settings.llm_provider = payload.llm.provider
@@ -130,6 +138,9 @@ class SettingsService:
                     payload.retrieval.intent_confidence_threshold
                 )
 
+        self._rebuild_runtime_services()
+        self._persist_to_env()
+
         self._logger.info(
             "settings.updated",
             extra={
@@ -139,6 +150,80 @@ class SettingsService:
             },
         )
         return await self.get_settings()
+
+    def _rebuild_runtime_services(self) -> None:
+        """重新生成运行期 LLM Provider 和 QueryRouter 并热更新至 ChatService。"""
+        if self._chat_service is None:
+            return
+        api_key = (
+            self._settings.llm_api_key.get_secret_value()
+            if self._settings.llm_api_key
+            else None
+        )
+        llm_factory = LlmProviderFactory()
+        new_llm_provider = llm_factory.create(
+            LlmRuntimeConfig(
+                provider=self._settings.llm_provider,
+                api_key=api_key,
+                base_url=self._settings.llm_base_url,
+                model=self._settings.llm_model,
+                timeout_seconds=self._settings.llm_timeout_seconds,
+                max_tokens=self._settings.llm_max_tokens,
+                temperature=self._settings.llm_temperature,
+            )
+        )
+        self._chat_service.set_llm_provider(new_llm_provider)
+
+        intent_classifier = None
+        if self._settings.intent_classifier_enabled:
+            intent_llm_provider = llm_factory.create(
+                LlmRuntimeConfig(
+                    provider=self._settings.llm_provider,
+                    api_key=api_key,
+                    base_url=self._settings.llm_base_url,
+                    model=self._settings.intent_model or self._settings.llm_model,
+                    timeout_seconds=self._settings.intent_timeout_seconds,
+                    max_tokens=self._settings.intent_max_tokens,
+                    temperature=0,
+                )
+            )
+            intent_classifier = LlmIntentClassifier(intent_llm_provider)
+
+        new_query_router = QueryRouter(
+            intent_classifier,
+            timeout_seconds=self._settings.intent_timeout_seconds,
+            confidence_threshold=self._settings.intent_confidence_threshold,
+        )
+        self._chat_service.set_query_router(new_query_router)
+        self._chat_service.set_rag_top_k(self._settings.rag_top_k)
+
+    def _persist_to_env(self) -> None:
+        """将最新的 LLM/RAG 设置持久化写入后端 .env 文件，保证重启后依然生效。"""
+        env_path = Path(__file__).resolve().parents[3] / ".env"
+        if not env_path.exists():
+            return
+        try:
+            lines = env_path.read_text(encoding="utf-8").splitlines()
+            env_dict: dict[str, str] = {}
+            for line in lines:
+                if line.strip() and not line.strip().startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    env_dict[k.strip()] = v.strip()
+
+            env_dict["BIYOU_LLM_PROVIDER"] = self._settings.llm_provider
+            if self._settings.llm_api_key:
+                env_dict["BIYOU_LLM_API_KEY"] = self._settings.llm_api_key.get_secret_value()
+            if self._settings.llm_base_url:
+                env_dict["BIYOU_LLM_BASE_URL"] = self._settings.llm_base_url
+            if self._settings.llm_model:
+                env_dict["BIYOU_LLM_MODEL"] = self._settings.llm_model
+                env_dict["BIYOU_INTENT_MODEL"] = self._settings.intent_model or self._settings.llm_model
+            env_dict["BIYOU_RAG_TOP_K"] = str(self._settings.rag_top_k)
+
+            new_content = "\n".join(f"{k}={v}" for k, v in env_dict.items()) + "\n"
+            env_path.write_text(new_content, encoding="utf-8")
+        except Exception as err:
+            self._logger.warning("settings.persist_env_failed: %s", err)
 
     async def test_llm_connection(
         self, payload: ProviderTestRequest

@@ -46,19 +46,46 @@ class LangChainLlmProvider:
         if self._configuration_error:
             raise LlmConfigurationError(self._configuration_error)
         trace_id = "-"
+        from time import perf_counter
+
+        start_time = perf_counter()
+        first_token_at: float | None = None
+        chunk_count = 0
+        total_chars = 0
         try:
             langchain_messages = tuple(self._to_langchain_message(message) for message in messages)
             async for chunk in self._chat_model.astream(langchain_messages):
                 trace_id = self._trace_id(chunk.response_metadata) or trace_id
                 content = self._text_content(chunk.content)
                 if content:
+                    if first_token_at is None:
+                        first_token_at = perf_counter()
+                        ttft_ms = round((first_token_at - start_time) * 1000, 2)
+                        self._logger.info(
+                            "llm.first_token_received",
+                            extra={
+                                "provider": self._provider_name,
+                                "model": self._model_name,
+                                "ttft_ms": ttft_ms,
+                            },
+                        )
+                    chunk_count += 1
+                    total_chars += len(content)
                     yield content
+
+            end_time = perf_counter()
+            total_llm_latency_ms = round((end_time - start_time) * 1000, 2)
+            ttft_ms = round((first_token_at - start_time) * 1000, 2) if first_token_at else total_llm_latency_ms
             self._logger.info(
                 "llm.langchain_stream_completed",
                 extra={
                     "provider": self._provider_name,
                     "model": self._model_name,
                     "provider_trace_id": trace_id,
+                    "ttft_ms": ttft_ms,
+                    "total_llm_latency_ms": total_llm_latency_ms,
+                    "chunk_count": chunk_count,
+                    "total_chars": total_chars,
                 },
             )
         except LlmProviderError:

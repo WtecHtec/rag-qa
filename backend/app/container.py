@@ -129,7 +129,7 @@ def build_default_container(settings: Settings) -> AppContainer:
         indexer=retrieval_service,
     )
     diagnostics_service = DiagnosticsService(settings)
-    settings_service = SettingsService(settings)
+    settings_service = SettingsService(settings, chat_service=chat_service)
 
     return AppContainer(
         knowledge_base_service=service,

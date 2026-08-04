@@ -100,6 +100,18 @@ class ChatService:
         self._id_factory = id_factory
         self._logger = logger or logging.getLogger(__name__)
 
+    def set_llm_provider(self, llm_provider: LlmProvider) -> None:
+        """运行期热替换 LLM 大模型 Provider。"""
+        self._llm_provider = llm_provider
+
+    def set_query_router(self, query_router: QueryRouter) -> None:
+        """运行期热替换查询路由与意图分类器。"""
+        self._query_router = query_router
+
+    def set_rag_top_k(self, rag_top_k: int) -> None:
+        """运行期热替换 RAG 检索 TopK 参数。"""
+        self._rag_top_k = rag_top_k
+
     async def create_conversation(self) -> Conversation:
         now = self._clock()
         conversation = Conversation(

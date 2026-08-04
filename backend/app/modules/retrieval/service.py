@@ -164,7 +164,13 @@ class RetrievalService:
         knowledge_base_id: UUID | None,
     ) -> VectorSearchResult:
 
+        from time import perf_counter
+
+        start_time = perf_counter()
         query_embedding = await self._embedding_provider.embed_query(normalized_query)
+        embed_time = perf_counter()
+        embedding_latency_ms = round((embed_time - start_time) * 1000, 2)
+
         self._validate_embeddings((query_embedding,), 1)
         # 多取 Child 候选，再按 parent_id 聚合，避免同一 Parent 占满结果。
         hits = await self._vector_store.search(
@@ -173,6 +179,9 @@ class RetrievalService:
             embedding_model=self._embedding_provider.model_name,
             limit=min(100, top_k * 4),
         )
+        lancedb_time = perf_counter()
+        vector_store_latency_ms = round((lancedb_time - embed_time) * 1000, 2)
+
         chunk_ids = tuple(
             dict.fromkeys([hit.parent_id for hit in hits] + [hit.child_id for hit in hits])
         )
@@ -217,6 +226,7 @@ class RetrievalService:
             embedding_model=self._embedding_provider.model_name,
             matches=tuple(matches[:top_k]),
         )
+        total_latency_ms = round((perf_counter() - start_time) * 1000, 2)
         self._logger.info(
             "retrieval.vector_searched",
             extra={
@@ -225,6 +235,9 @@ class RetrievalService:
                 ),
                 "child_hit_count": len(hits),
                 "parent_match_count": len(result.matches),
+                "embedding_latency_ms": embedding_latency_ms,
+                "vector_store_latency_ms": vector_store_latency_ms,
+                "total_retrieval_latency_ms": total_latency_ms,
             },
         )
         return result
