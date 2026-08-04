@@ -110,7 +110,9 @@ class SqliteConversationRepository:
                     top_score REAL,
                     retrieval_latency_ms REAL NOT NULL,
                     llm_latency_ms REAL,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    ai_response TEXT,
+                    retrieved_chunks_json TEXT
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_conversations_updated
@@ -123,6 +125,18 @@ class SqliteConversationRepository:
                     ON retrieval_traces(created_at DESC);
                 """
             )
+            trace_columns = await (
+                await connection.execute("PRAGMA table_info(retrieval_traces)")
+            ).fetchall()
+            if not any(column[1] == "ai_response" for column in trace_columns):
+                await connection.execute(
+                    "ALTER TABLE retrieval_traces ADD COLUMN ai_response TEXT"
+                )
+            if not any(column[1] == "retrieved_chunks_json" for column in trace_columns):
+                await connection.execute(
+                    "ALTER TABLE retrieval_traces ADD COLUMN retrieved_chunks_json TEXT"
+                )
+
             message_columns = await (
                 await connection.execute("PRAGMA table_info(chat_messages)")
             ).fetchall()
@@ -409,6 +423,8 @@ class SqliteConversationRepository:
         top_score: float | None,
         retrieval_latency_ms: float,
         llm_latency_ms: float | None = None,
+        ai_response: str | None = None,
+        recalled_chunks_json: str | None = None,
     ) -> None:
         async with self._connect() as connection:
             now_str = datetime.now(UTC).isoformat()
@@ -418,8 +434,8 @@ class SqliteConversationRepository:
                 INSERT INTO retrieval_traces(
                     id, trace_id, query, rewritten_query, intent_category,
                     retrieved_chunks_count, top_score, retrieval_latency_ms,
-                    llm_latency_ms, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    llm_latency_ms, created_at, ai_response, retrieved_chunks_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row_id,
@@ -432,9 +448,40 @@ class SqliteConversationRepository:
                     retrieval_latency_ms,
                     llm_latency_ms,
                     now_str,
+                    ai_response,
+                    recalled_chunks_json,
                 ),
             )
             await connection.commit()
+
+    async def update_retrieval_trace_response(
+        self,
+        *,
+        trace_id: str,
+        ai_response: str,
+        llm_latency_ms: float | None = None,
+    ) -> None:
+        async with self._connect() as connection:
+            if llm_latency_ms is not None:
+                await connection.execute(
+                    """
+                    UPDATE retrieval_traces
+                    SET ai_response = ?, llm_latency_ms = ?
+                    WHERE trace_id = ?
+                    """,
+                    (ai_response, llm_latency_ms, trace_id),
+                )
+            else:
+                await connection.execute(
+                    """
+                    UPDATE retrieval_traces
+                    SET ai_response = ?
+                    WHERE trace_id = ?
+                    """,
+                    (ai_response, trace_id),
+                )
+            await connection.commit()
+
 
     @staticmethod
     async def _update_message(

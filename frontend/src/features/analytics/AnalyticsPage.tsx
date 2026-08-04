@@ -1,6 +1,6 @@
 /**
  * RAG 检索链路 Trace 独立分析页面。
- * 提供完整的问答 Trace 数据浏览、检索查询词匹配、改写词对比、意图过滤及全量细节 Modal。
+ * 提供完整的问答 Trace 数据浏览、检索查询词匹配、改写词对比、AI 回复内容与召回 Chunk 明细 Drawer/Modal。
  */
 
 import { useState } from "react";
@@ -21,7 +21,8 @@ export function AnalyticsPage() {
     return (
       t.query.toLowerCase().includes(q) ||
       t.trace_id.toLowerCase().includes(q) ||
-      (t.rewritten_query && t.rewritten_query.toLowerCase().includes(q))
+      (t.rewritten_query && t.rewritten_query.toLowerCase().includes(q)) ||
+      (t.ai_response && t.ai_response.toLowerCase().includes(q))
     );
   });
 
@@ -30,7 +31,7 @@ export function AnalyticsPage() {
       {/* 标题 */}
       <div className="analytics-heading">
         <h1>RAG 检索链路 Trace 追踪</h1>
-        <p>独立审计与排查每次问答的核心检索词改写、意图分类、召回得分及全链路耗时</p>
+        <p>独立审计与排查每次问答的核心检索词改写、召回 Chunk 切片、AI 最终回复与全链路耗时</p>
       </div>
 
       {error && (
@@ -48,7 +49,7 @@ export function AnalyticsPage() {
           <div className="analytics-search-box">
             <input
               type="text"
-              placeholder="搜索 Trace ID / 原始问题 / 改写词..."
+              placeholder="搜索 Trace ID / 用户问题 / 改写词 / AI 回复..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
             />
@@ -76,11 +77,12 @@ export function AnalyticsPage() {
               <thead>
                 <tr>
                   <th>Trace ID</th>
-                  <th>原始用户问题</th>
+                  <th>原始用户提问</th>
                   <th>改写检索词 (Rewrite)</th>
                   <th>召回 Chunk 数</th>
                   <th>最高相似度 (Score)</th>
                   <th>检索耗时</th>
+                  <th>LLM 生成耗时</th>
                   <th>时间</th>
                   <th>操作</th>
                 </tr>
@@ -91,10 +93,10 @@ export function AnalyticsPage() {
                     <td style={{ fontFamily: "monospace", fontSize: "11px", fontWeight: 600 }}>
                       {trace.trace_id}
                     </td>
-                    <td style={{ fontWeight: 600, maxWidth: "220px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    <td style={{ fontWeight: 600, maxWidth: "180px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                       {trace.query}
                     </td>
-                    <td style={{ color: "var(--color-accent)", maxWidth: "200px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    <td style={{ color: "var(--color-accent)", maxWidth: "160px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                       {trace.rewritten_query ?? "--"}
                     </td>
                     <td>{trace.retrieved_chunks_count} 条</td>
@@ -106,6 +108,9 @@ export function AnalyticsPage() {
                     <td style={{ fontFamily: "monospace" }}>
                       {formatLatency(trace.retrieval_latency_ms)}
                     </td>
+                    <td style={{ fontFamily: "monospace" }}>
+                      {trace.llm_latency_ms ? formatLatency(trace.llm_latency_ms) : "--"}
+                    </td>
                     <td style={{ fontSize: "11px", color: "var(--color-muted)" }}>
                       {new Date(trace.timestamp).toLocaleTimeString()}
                     </td>
@@ -116,7 +121,7 @@ export function AnalyticsPage() {
                         className="kb-button kb-button--quiet"
                         style={{ minHeight: "26px", padding: "0 8px", fontSize: "11px" }}
                       >
-                        详情
+                        查看明细
                       </button>
                     </td>
                   </tr>
@@ -148,8 +153,9 @@ export function AnalyticsPage() {
               </button>
             </div>
 
+            {/* 1. 提问与改写 */}
             <div className="analytics-detail-item">
-              <label>原始用户提问 (Query)</label>
+              <label>原始用户提问 (User Query)</label>
               <div>{selectedTrace.query}</div>
             </div>
 
@@ -158,13 +164,62 @@ export function AnalyticsPage() {
               <div>{selectedTrace.rewritten_query ?? "未触发改写，直接使用原词检索"}</div>
             </div>
 
+            {/* 2. AI 最终回复 */}
             <div className="analytics-detail-item">
-              <label>检索分析指标 (Retrieval Performance)</label>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "10px" }}>
-                <span>最高相似度: <strong>{selectedTrace.top_score ?? "--"}</strong></span>
-                <span>召回 Context 数量: <strong>{selectedTrace.retrieved_chunks_count} 条</strong></span>
-                <span>检索耗时: <strong>{formatLatency(selectedTrace.retrieval_latency_ms)}</strong></span>
+              <label>AI 最终回复内容 (AI Response)</label>
+              <div style={{ whiteSpace: "pre-wrap", maxHeight: "200px", overflowY: "auto" }}>
+                {selectedTrace.ai_response || "(暂无回复内容或生成尚未完成)"}
               </div>
+            </div>
+
+            {/* 3. 性能指标 */}
+            <div className="analytics-detail-item">
+              <label>检索与生成耗时 (Performance)</label>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "10px" }}>
+                <span>最高相似度: <strong>{selectedTrace.top_score ?? "--"}</strong></span>
+                <span>召回 Chunk 数: <strong>{selectedTrace.retrieved_chunks_count} 条</strong></span>
+                <span>检索耗时: <strong>{formatLatency(selectedTrace.retrieval_latency_ms)}</strong></span>
+                <span>生成耗时: <strong>{selectedTrace.llm_latency_ms ? formatLatency(selectedTrace.llm_latency_ms) : "--"}</strong></span>
+              </div>
+            </div>
+
+            {/* 4. 召回的 Chunk 内容列表 */}
+            <div className="analytics-detail-item">
+              <label>召回的 Chunk 节点明细 ({selectedTrace.recalled_chunks?.length ?? 0} 条)</label>
+              {selectedTrace.recalled_chunks && selectedTrace.recalled_chunks.length > 0 ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: "10px", marginTop: "6px" }}>
+                  {selectedTrace.recalled_chunks.map((chunk, idx) => (
+                    <div
+                      key={idx}
+                      style={{
+                        padding: "12px",
+                        borderRadius: "var(--radius-small)",
+                        border: "1px solid var(--color-line)",
+                        background: "var(--color-surface-solid)",
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "6px", fontSize: "11px", fontWeight: 600 }}>
+                        <span style={{ color: "var(--color-accent)" }}>
+                          📄 {chunk.document_name} {chunk.heading_path ? `> ${chunk.heading_path}` : ""}
+                        </span>
+                        <span className="diag-badge is-healthy">
+                          匹配得分: {chunk.score.toFixed(3)}
+                        </span>
+                      </div>
+                      <div style={{ fontSize: "11px", color: "var(--color-text)", marginBottom: "4px" }}>
+                        <strong>Child 预览:</strong> {chunk.child_preview}
+                      </div>
+                      <div style={{ fontSize: "11px", color: "var(--color-muted)", whiteSpace: "pre-wrap", maxHeight: "120px", overflowY: "auto", background: "color-mix(in srgb, var(--color-muted) 5%, transparent)", padding: "6px 8px", borderRadius: "4px" }}>
+                        <strong>Parent 上下文:</strong> {chunk.parent_content}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div style={{ color: "var(--color-muted)", fontSize: "11px", fontStyle: "italic" }}>
+                  本次问答未命中有价值的知识库 Chunk 或未触发 RAG 检索。
+                </div>
+              )}
             </div>
           </div>
         </div>

@@ -60,6 +60,16 @@ class FeedbackStatsResponse(BaseModel):
     reason_stats: list[FeedbackReasonStat] = Field(description="点踩具体原因分布")
 
 
+class RecalledChunkDetail(BaseModel):
+    """召回的 Chunk 节点明细。"""
+
+    document_name: str = Field(description="所属文档名称")
+    heading_path: str = Field(default="", description="标题层级路径")
+    score: float = Field(default=0.0, description="匹配得分")
+    child_preview: str = Field(default="", description="Child Chunk 预览文本")
+    parent_content: str = Field(default="", description="Parent Chunk 完整上下文")
+
+
 class RetrievalTraceItem(BaseModel):
     """单条 RAG 检索链路耗时与细节记录。"""
 
@@ -72,6 +82,8 @@ class RetrievalTraceItem(BaseModel):
     retrieval_latency_ms: float = Field(description="向量/混合检索总耗时 (毫秒)")
     llm_latency_ms: float | None = Field(default=None, description="LLM 生成首字/总耗时 (毫秒)")
     timestamp: datetime = Field(description="请求发生时间")
+    ai_response: str | None = Field(default=None, description="AI 生成的回复内容")
+    recalled_chunks: list[RecalledChunkDetail] = Field(default_factory=list, description="召回的文本块明细列表")
 
 
 class RetrievalTraceListResponse(BaseModel):

@@ -3,6 +3,7 @@
 负责读取当前生效的系统配置（实现敏感 Key 安全脱敏）、增量更新运行期参数，以及测试 LLM/Embedding 的在线连通性。
 """
 
+import logging
 import time
 from typing import Any
 
@@ -35,8 +36,13 @@ def mask_secret(secret: str | None) -> str | None:
 class SettingsService:
     """系统设置业务服务，解耦数据读取与配置更新。"""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        logger: logging.Logger | None = None,
+    ) -> None:
         self._settings = settings
+        self._logger = logger or logging.getLogger(__name__)
 
     async def get_settings(self) -> SystemSettingsRead:
         """获取当前脱敏后的系统完整配置。"""
@@ -124,6 +130,14 @@ class SettingsService:
                     payload.retrieval.intent_confidence_threshold
                 )
 
+        self._logger.info(
+            "settings.updated",
+            extra={
+                "provider": self._settings.llm_provider,
+                "model": self._settings.llm_model,
+                "rag_top_k": self._settings.rag_top_k,
+            },
+        )
         return await self.get_settings()
 
     async def test_llm_connection(
@@ -153,20 +167,35 @@ class SettingsService:
                     temperature=0.0,
                 )
             )
-            # 简单验证 Provider 实例建立
             latency = round((time.perf_counter() - start) * 1000, 2)
             if provider:
+                self._logger.info(
+                    "settings.test_llm_success",
+                    extra={
+                        "provider": payload.provider,
+                        "model": payload.model,
+                        "latency_ms": latency,
+                    },
+                )
                 return ProviderTestResponse(
                     success=True,
                     message=f"成功连接至 {payload.provider} (模型: {payload.model})",
                     latency_ms=latency,
                 )
+            self._logger.warning(
+                "settings.test_llm_failed",
+                extra={"provider": payload.provider, "model": payload.model},
+            )
             return ProviderTestResponse(
                 success=False,
                 message="初始化 LLM Provider 失败",
                 latency_ms=None,
             )
         except Exception as err:
+            self._logger.exception(
+                "settings.test_llm_exception",
+                extra={"provider": payload.provider, "model": payload.model},
+            )
             return ProviderTestResponse(
                 success=False,
                 message=f"LLM 连通性测试异常: {err!s}",

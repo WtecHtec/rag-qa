@@ -63,6 +63,19 @@ export interface FeedbackStatsResponse {
   reason_stats: FeedbackReasonStat[];
 }
 
+export interface RecalledChunkDetail {
+  /** 所属文档名称 */
+  document_name: string;
+  /** 标题层级路径 */
+  heading_path: string;
+  /** 匹配得分 */
+  score: number;
+  /** Child Chunk 预览 */
+  child_preview: string;
+  /** Parent Chunk 完整上下文 */
+  parent_content: string;
+}
+
 export interface RetrievalTraceItem {
   /** Trace ID */
   trace_id: string;
@@ -82,6 +95,10 @@ export interface RetrievalTraceItem {
   llm_latency_ms: number | null;
   /** 发生时间 */
   timestamp: string;
+  /** AI 最终生成回复 */
+  ai_response: string | null;
+  /** 召回的 Chunk 细节列表 */
+  recalled_chunks: RecalledChunkDetail[];
 }
 
 export interface RetrievalTraceListResponse {
@@ -92,7 +109,7 @@ export interface RetrievalTraceListResponse {
 export interface LogEventItem {
   timestamp: string;
   level: "INFO" | "WARNING" | "ERROR";
-  event: str;
+  event: string;
   message: string;
   trace_id: string | null;
 }

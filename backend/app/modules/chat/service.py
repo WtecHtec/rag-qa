@@ -177,6 +177,14 @@ class ChatService:
                 find_latest_answer_rag_mode(history),
             )
         )
+        self._logger.info(
+            "chat.turn_started",
+            extra={
+                "conversation_id": str(conversation_id),
+                "intent": query_plan.intent.value,
+                "retrieval_query": query_plan.retrieval_query,
+            },
+        )
         now = self._clock()
         user_message = self._new_message(
             conversation.id,
@@ -391,6 +399,8 @@ class ChatService:
             user_message=prepared.user_message,
         )
         parts: list[str] = []
+        import time
+        llm_start = time.perf_counter()
         try:
             if prepared.direct_answer is not None:
                 parts.append(prepared.direct_answer)
@@ -400,6 +410,7 @@ class ChatService:
                     parts.append(delta)
                     yield AnswerStreamEvent("delta", delta=delta)
             content = "".join(parts).strip()
+            llm_latency = round((time.perf_counter() - llm_start) * 1000, 2)
             cited_sources = select_cited_sources(content, prepared.citations)
             completed = replace(
                 prepared.assistant_message,
@@ -419,6 +430,15 @@ class ChatService:
                     completed,
                     cited_sources,
                 )
+            trace_id = f"trc-{str(prepared.assistant_message.id)[:8]}"
+            try:
+                await self._repository.update_retrieval_trace_response(
+                    trace_id=trace_id,
+                    ai_response=content,
+                    llm_latency_ms=llm_latency,
+                )
+            except Exception as e:
+                self._logger.warning("update_retrieval_trace_response.failed: %s", e)
             yield AnswerStreamEvent(
                 "done",
                 message=completed,
@@ -471,6 +491,14 @@ class ChatService:
             raise ChatValidationError("只能评价助手回答")
         normalized_reason = reason.strip() if reason else None
         await self._repository.save_feedback(message_id, rating, normalized_reason)
+        self._logger.info(
+            "chat.feedback_saved",
+            extra={
+                "message_id": str(message_id),
+                "rating": rating.value,
+                "reason": normalized_reason,
+            },
+        )
 
     async def _prepare_with_retrieval(
         self,
@@ -494,12 +522,33 @@ class ChatService:
             assistant_message.id,
             result,
         )
+        import json
+        recalled_chunks = [
+            {
+                "document_name": c.document_name,
+                "heading_path": c.heading_path,
+                "score": c.score,
+                "child_preview": c.child_preview,
+                "parent_content": c.parent_content,
+            }
+            for c in citations
+        ]
+        recalled_chunks_json = json.dumps(recalled_chunks, ensure_ascii=False) if recalled_chunks else None
         top_score = (
             citations[0].score
             if citations
             else (result.matches[0].score if result.matches else None)
         )
         trace_id = f"trc-{str(assistant_message.id)[:8]}"
+        self._logger.info(
+            "rag.retrieval_completed",
+            extra={
+                "retrieval_query": retrieval_query,
+                "citations_count": len(citations),
+                "top_score": top_score,
+                "latency_ms": retrieval_latency,
+            },
+        )
         try:
             await self._repository.save_retrieval_trace(
                 trace_id=trace_id,
@@ -513,6 +562,7 @@ class ChatService:
                 retrieved_chunks_count=len(citations),
                 top_score=top_score,
                 retrieval_latency_ms=retrieval_latency,
+                recalled_chunks_json=recalled_chunks_json,
             )
         except Exception as e:
             self._logger.warning("save_retrieval_trace.failed: %s", e)

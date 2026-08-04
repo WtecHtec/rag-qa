@@ -17,6 +17,7 @@ from app.modules.diagnostics.schemas import (
     FeedbackStatsResponse,
     LogEventItem,
     LogEventListResponse,
+    RecalledChunkDetail,
     RetrievalTraceItem,
     RetrievalTraceListResponse,
     SystemHealthResponse,
@@ -247,6 +248,7 @@ class DiagnosticsService:
 
     async def get_retrieval_traces(self, limit: int = 20) -> RetrievalTraceListResponse:
         """获取最近真实的 RAG 检索链路 Trace 样本记录。"""
+        import json
         items: list[RetrievalTraceItem] = []
         if self._db_path.exists():
             try:
@@ -256,7 +258,7 @@ class DiagnosticsService:
                         """
                         SELECT trace_id, query, rewritten_query, intent_category,
                                retrieved_chunks_count, top_score, retrieval_latency_ms,
-                               llm_latency_ms, created_at
+                               llm_latency_ms, created_at, ai_response, retrieved_chunks_json
                         FROM retrieval_traces
                         ORDER BY created_at DESC
                         LIMIT ?
@@ -266,6 +268,24 @@ class DiagnosticsService:
                     rows = cursor.fetchall()
                     for row in rows:
                         dt = datetime.fromisoformat(row[8]) if isinstance(row[8], str) else datetime.now(timezone.utc)
+                        raw_chunks = row[10]
+                        recalled_chunks: list[RecalledChunkDetail] = []
+                        if raw_chunks:
+                            try:
+                                parsed = json.loads(raw_chunks)
+                                for item in parsed:
+                                    recalled_chunks.append(
+                                        RecalledChunkDetail(
+                                            document_name=item.get("document_name", ""),
+                                            heading_path=item.get("heading_path", ""),
+                                            score=item.get("score", 0.0),
+                                            child_preview=item.get("child_preview", ""),
+                                            parent_content=item.get("parent_content", ""),
+                                        )
+                                    )
+                            except Exception:
+                                pass
+
                         items.append(
                             RetrievalTraceItem(
                                 trace_id=row[0],
@@ -277,6 +297,8 @@ class DiagnosticsService:
                                 retrieval_latency_ms=row[6],
                                 llm_latency_ms=row[7],
                                 timestamp=dt,
+                                ai_response=row[9],
+                                recalled_chunks=recalled_chunks,
                             )
                         )
             except sqlite3.Error:
@@ -287,34 +309,19 @@ class DiagnosticsService:
     async def get_system_logs(
         self, level: str | None = None, limit: int = 50
     ) -> LogEventListResponse:
-        """获取模拟与审计系统控制台日志。"""
-        now = datetime.now(timezone.utc)
-        sample_logs = [
-            LogEventItem(
-                timestamp=now,
-                level="INFO",
-                event="system.startup",
-                message=f"BiYou 服务正常运行在 {self._settings.environment} 环境",
-                trace_id=None,
-            ),
-            LogEventItem(
-                timestamp=now,
-                level="INFO",
-                event="vector_store.initialized",
-                message=f"LanceDB 存储路径 {self._settings.vector_database_path}",
-                trace_id=None,
-            ),
-            LogEventItem(
-                timestamp=now,
-                level="INFO",
-                event="llm.config",
-                message=f"当前默认 Provider: {self._settings.llm_provider}, 模型: {self._settings.llm_model}",
-                trace_id=None,
-            ),
-        ]
-        if level:
-            filtered = [log for log in sample_logs if log.level == level.upper()]
-        else:
-            filtered = sample_logs
+        """获取全量真实发生的系统控制台与审计运行日志。"""
+        from app.core.logging import get_recent_log_events
 
-        return LogEventListResponse(items=filtered[:limit], total=len(filtered))
+        raw_events = get_recent_log_events(level=level, limit=limit)
+        items = [
+            LogEventItem(
+                timestamp=e.timestamp,
+                level=e.level if e.level in ("INFO", "WARNING", "ERROR") else "INFO",  # type: ignore[arg-type]
+                event=e.event,
+                message=e.message,
+                trace_id=e.trace_id,
+            )
+            for e in raw_events
+        ]
+        return LogEventListResponse(items=items, total=len(items))
+

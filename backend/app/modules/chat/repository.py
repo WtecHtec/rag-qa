@@ -55,4 +55,14 @@ class ConversationRepository(Protocol):
         top_score: float | None,
         retrieval_latency_ms: float,
         llm_latency_ms: float | None = None,
+        ai_response: str | None = None,
+        recalled_chunks_json: str | None = None,
     ) -> None: ...
+    async def update_retrieval_trace_response(
+        self,
+        *,
+        trace_id: str,
+        ai_response: str,
+        llm_latency_ms: float | None = None,
+    ) -> None: ...
+
