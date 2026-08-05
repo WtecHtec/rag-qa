@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  # 后端 Python FastAPI 服务
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: biyou-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    environment:
+      - BIYOU_ENVIRONMENT=production
+      - BIYOU_LOG_LEVEL=INFO
+      - BIYOU_DATABASE_PATH=/app/data/biyou.db
+      - BIYOU_DOCUMENT_STORAGE_PATH=/app/data/documents
+      - BIYOU_VECTOR_DATABASE_PATH=/app/data/vectors
+
+  # 前端 Nginx 服务
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: biyou-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend

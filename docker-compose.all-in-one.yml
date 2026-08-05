@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  # 全功能综合一体化单容器部署服务 (Frontend + Backend + Nginx)
+  biyou-all-in-one:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: biyou-app
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    environment:
+      - BIYOU_ENVIRONMENT=production
+      - BIYOU_LOG_LEVEL=INFO
+      - BIYOU_DATABASE_PATH=/app/data/biyou.db
+      - BIYOU_DOCUMENT_STORAGE_PATH=/app/data/documents
+      - BIYOU_VECTOR_DATABASE_PATH=/app/data/vectors

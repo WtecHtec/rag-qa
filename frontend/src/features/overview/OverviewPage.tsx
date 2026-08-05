@@ -4,8 +4,8 @@ import { Icon } from "../../components/ui/Icon";
 import { apiRequest } from "../../shared/api/client";
 import { useBrowserPath } from "../../shared/hooks/useBrowserPath";
 import type { Conversation } from "../chat/types/chat";
-import type { SystemMetricsItem } from "../diagnostics/types/diagnostics";
-import type { KnowledgeBaseList } from "../knowledge-base/types/knowledgeBase";
+import type { SystemMetricsResponse } from "../diagnostics/types/diagnostics";
+import type { KnowledgeBasePage } from "../knowledge-base/types/knowledgeBase";
 import "./styles/overview.css";
 
 interface RecentDocItem {
@@ -25,7 +25,7 @@ interface OverviewPageProps {
 
 export function OverviewPage({ onNavigate }: OverviewPageProps = {}) {
   const { navigate } = useBrowserPath("/overview");
-  const [metrics, setMetrics] = useState<SystemMetricsItem | null>(null);
+  const [metrics, setMetrics] = useState<SystemMetricsResponse | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [recentDocs, setRecentDocs] = useState<RecentDocItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -44,8 +44,8 @@ export function OverviewPage({ onNavigate }: OverviewPageProps = {}) {
     async function loadOverviewData() {
       try {
         const [metricsRes, kbRes, chatRes] = await Promise.allSettled([
-          apiRequest<SystemMetricsItem>("/diagnostics/metrics", { signal: controller.signal }),
-          apiRequest<KnowledgeBaseList>("/knowledge-bases?limit=20", { signal: controller.signal }),
+          apiRequest<SystemMetricsResponse>("/diagnostics/metrics", { signal: controller.signal }),
+          apiRequest<KnowledgeBasePage>("/knowledge-bases?limit=20", { signal: controller.signal }),
           apiRequest<{ items: Conversation[] }>("/conversations?limit=5", { signal: controller.signal }),
         ]);
 
