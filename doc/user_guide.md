@@ -11,14 +11,33 @@
 - **Python 环境**：Python 3.12+ (推荐使用 `uv` 包管理器)
 - **Node.js 环境**：Node.js 18+ (包含 `npm`)
 
-### 1.2 一键启动服务
-在项目根目录打开终端，运行启动脚本：
+### 1.2 本地开发一键启动
+在项目根目录打开终端，运行开发启动脚本：
 ```bash
 ./scripts/dev.sh
 ```
 启动成功后，脚本会自动启动后端与前端服务：
 - 前端访问入口：`http://localhost:5173`
 - 后端 API 地址：`http://localhost:8000`
+
+### 1.3 Docker 容器化部署指南
+
+系统提供了 **前后端分离部署** 与 **全功能综合一体化部署** 两种 Docker 方案：
+
+#### 方案 A：前后端分离独立部署 (推荐)
+运行标准 Docker Compose 文件，前端（Nginx 80 端口）与后端（FastAPI 8000 端口）分别独立运行在两个镜像容器中：
+```bash
+docker-compose up -d --build
+```
+- 前端 Web 访问地址：`http://localhost`
+- 后端 API 与 Swagger 文档：`http://localhost:8000/docs`
+
+#### 方案 B：全功能综合一体化单容器部署
+如果希望仅运行一个包含了前端 Nginx + 后端 FastAPI 的综合容器：
+```bash
+docker-compose -f docker-compose.all-in-one.yml up -d --build
+```
+- 容器一键挂载数据持久化目录 `./data` 与日志目录 `./logs`。
 
 ---
 

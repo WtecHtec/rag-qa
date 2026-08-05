@@ -4,6 +4,7 @@ fastembed<1,>=0.7
 lancedb<1,>=0.25
 langchain<2,>=1.0
 langchain-openai<2,>=1.0
+loguru>=0.7.3
 pydantic-settings<3,>=2.7
 uvicorn[standard]<1,>=0.34
 
