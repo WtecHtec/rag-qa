@@ -1,6 +1,9 @@
 # BiYou
 
+[演示视频](https://www.bilibili.com/video/BV1u1un6vEhi/?share_source=copy_web&vd_source=b38d30b9afa4cdb7d6538c4c2978a4c8)
+
 本地优先的个人知识库问答系统。项目采用前后端分离结构：
+
 
 - `frontend/`：React、TypeScript、Vite
 - `backend/`：FastAPI
