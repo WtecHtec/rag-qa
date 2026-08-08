@@ -4,6 +4,10 @@
 
 [可参考 rag-web-ui](https://github.com/rag-web-ui/rag-web-ui)
 
+[RAG 教程](https://github.com/GiovanniPasq/agentic-rag-for-dummies)
+
+[文件转md](https://github.com/firecrawl/anydoc)
+
 本地优先的个人知识库问答系统。项目采用前后端分离结构：
 
 
