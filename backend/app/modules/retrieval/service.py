@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import logging
 from collections import defaultdict
@@ -277,13 +278,22 @@ class RetrievalService:
             return ()
 
         child_ids = [hit.child_id for hit in valid_hits]
-        chunks = await self._chunk_reader.get_chunks(child_ids)
+        parent_ids = [hit.parent_id for hit in valid_hits]
+        chunks = await self._chunk_reader.get_chunks([*child_ids, *parent_ids])
+
+        doc_ids = {hit.document_id for hit in valid_hits}
+        docs = await asyncio.gather(
+            *(self._knowledge_base_reader.get(doc_id) for doc_id in doc_ids)
+        )
+        doc_map = {doc.id: doc for doc in docs if doc is not None}
 
         items: list[ChildChunkItem] = []
         for hit in valid_hits:
             child = chunks.get(hit.child_id)
             if child is None or child.kind is not ChunkKind.CHILD or child.parent_id is None:
                 continue
+            parent = chunks.get(child.parent_id)
+            doc = doc_map.get(child.document_id)
             items.append(
                 ChildChunkItem(
                     parent_id=child.parent_id,
@@ -292,6 +302,11 @@ class RetrievalService:
                     heading_path=child.heading_path,
                     content=child.content,
                     score=hit.score,
+                    document_name=doc.filename if doc else "",
+                    parent_content=parent.content if parent else child.content,
+                    start_offset=child.start_offset,
+                    end_offset=child.end_offset,
+                    knowledge_base_id=doc.knowledge_base_id if doc else None,
                 )
             )
         return tuple(items)
@@ -301,12 +316,15 @@ class RetrievalService:
         chunk = await self._chunk_reader.get_chunk(parent_id)
         if chunk is None or chunk.kind is not ChunkKind.PARENT:
             return None
+        doc = await self._knowledge_base_reader.get(chunk.document_id)
         return ParentChunkDetail(
             parent_id=chunk.id,
             document_id=chunk.document_id,
             heading_path=chunk.heading_path,
             content=chunk.content,
             char_count=chunk.char_count,
+            document_name=doc.filename if doc else "",
+            knowledge_base_id=doc.knowledge_base_id if doc else None,
         )
 
     def _validate_embeddings(self, embeddings: Sequence[tuple[float, ...]], expected: int) -> None:

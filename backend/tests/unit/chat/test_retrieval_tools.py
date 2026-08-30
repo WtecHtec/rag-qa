@@ -22,6 +22,7 @@ async def test_search_child_chunks_tool_success() -> None:
             heading_path="Section 1",
             content="这是子块内容",
             score=0.95,
+            document_name="测试文档.md",
         ),
     )
 
@@ -32,6 +33,8 @@ async def test_search_child_chunks_tool_success() -> None:
     search_tool = next(t for t in tools if t.name == "search_child_chunks")
     result = await search_tool.ainvoke({"query": "测试查询", "limit": 5})
 
+    assert "Document: 测试文档.md" in result
+    assert f"Chunk ID: {child_id}" in result
     assert f"Parent ID: {parent_id}" in result
     assert "Heading: Section 1" in result
     assert "Content: 这是子块内容" in result

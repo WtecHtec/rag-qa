@@ -26,10 +26,11 @@ def create_retrieval_tools(
     retrieval_service: RetrievalService,
     *,
     knowledge_base_id: UUID | None = None,
+    recalled_sink: list[Any] | None = None,
 ) -> Sequence[BaseTool]:
     """构建两阶段检索工具集合（纯函数构造，扁平易读）。
 
-    1. search_child_chunks: 第一阶段精细子块初筛
+    1. search_child_chunks: 第一阶段精细子块初筛，返回真实文件名、Chunk ID 与 Parent ID
     2. retrieve_parent_chunks: 第二阶段按需获取父块大上下文
     """
 
@@ -37,7 +38,7 @@ def create_retrieval_tools(
     async def search_child_chunks(query: str, limit: int = 5) -> str:
         """在向量知识库中搜索与问题相关的文档片段（第一阶段初筛）。
 
-        返回值包含 Parent ID、标题路径和子块摘要内容。如果内容相关但上下文不够完整，
+        返回值包含文档文件名、Parent ID、Chunk ID、标题路径和子块内容。如果内容相关但上下文不够完整，
         请使用返回的 Parent ID 调用 retrieve_parent_chunks 获取完整段落。
 
         Args:
@@ -56,9 +57,15 @@ def create_retrieval_tools(
                 logger.info("tool.search_child_chunks.end", extra={"result": output})
                 return output
 
+            if recalled_sink is not None:
+                recalled_sink.extend(items)
+
             formatted_chunks = [
-                f"Parent ID: {item.parent_id}\n"
+                f"Document: {item.document_name or '未知文档'}\n"
                 f"Heading: {item.heading_path or 'General'}\n"
+                f"Chunk ID: {item.child_id}\n"
+                f"Parent ID: {item.parent_id}\n"
+                f"Score: {item.score:.2f}\n"
                 f"Content: {item.content.strip()}"
                 for item in items
             ]
@@ -92,6 +99,7 @@ def create_retrieval_tools(
                 return output
 
             output = (
+                f"Document: {parent.document_name or '未知文档'}\n"
                 f"Parent ID: {parent.parent_id}\n"
                 f"Heading: {parent.heading_path or 'General'}\n"
                 f"Content: {parent.content.strip()}"

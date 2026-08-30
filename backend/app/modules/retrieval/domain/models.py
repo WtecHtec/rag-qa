@@ -64,6 +64,11 @@ class ChildChunkItem:
     heading_path: str
     content: str
     score: float
+    document_name: str = ""
+    parent_content: str = ""
+    start_offset: int = 0
+    end_offset: int = 0
+    knowledge_base_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,3 +80,5 @@ class ParentChunkDetail:
     heading_path: str
     content: str
     char_count: int
+    document_name: str = ""
+    knowledge_base_id: UUID | None = None

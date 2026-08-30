@@ -82,8 +82,12 @@ class FakeRetrievalService:
                 child_id=CHILD_ID,
                 document_id=DOCUMENT_ID,
                 heading_path="Chunk 策略",
-                content="Parent 提供完整上下文，Child 负责精准检索。",
+                content="Child 负责精准检索。",
                 score=0.92,
+                document_name="架构设计.md",
+                parent_content="Parent 提供完整上下文，Child 负责精准检索。",
+                start_offset=12,
+                end_offset=25,
             ),
         )
 
@@ -96,6 +100,7 @@ class FakeRetrievalService:
             heading_path="Chunk 策略",
             content="Parent 提供完整上下文，Child 负责精准检索。",
             char_count=50,
+            document_name="架构设计.md",
         )
 
 

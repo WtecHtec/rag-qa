@@ -337,8 +337,12 @@ class ChatService:
                 # 追加当前用户提问
                 input_messages.append(HumanMessage(content=prepared.user_message.content))
 
-                # 2. 构建领域检索工具与 LangGraph 双层图
-                tools = create_retrieval_tools(self._retrieval_service)
+                # 2. 构建领域检索工具与 LangGraph 双层图（挂载命中子块收集器）
+                recalled_sink: list[Any] = []
+                tools = create_retrieval_tools(
+                    self._retrieval_service,
+                    recalled_sink=recalled_sink,
+                )
                 graph = create_agentic_rag_graph(self._get_chat_model(), tools)
 
                 # 3. 驱动 LangGraph 异步流式执行
@@ -371,30 +375,57 @@ class ChatService:
                 content = "未能从文档中检索到有效回答。"
                 yield AnswerStreamEvent("delta", delta=content)
 
+            # 4. 构建结构化 Citation 实体列表
+            citations_list: list[Citation] = []
+            seen_child_ids: set[UUID] = set()
+            for item in recalled_sink:
+                if item.child_id in seen_child_ids:
+                    continue
+                seen_child_ids.add(item.child_id)
+                citations_list.append(
+                    Citation(
+                        id=self._id_factory(),
+                        message_id=prepared.assistant_message.id,
+                        knowledge_base_id=getattr(item, "knowledge_base_id", None) or prepared.conversation.id,
+                        document_id=item.document_id,
+                        parent_id=item.parent_id,
+                        child_id=item.child_id,
+                        citation_number=len(citations_list) + 1,
+                        document_name=getattr(item, "document_name", "") or "相关文档",
+                        heading_path=item.heading_path,
+                        parent_content=getattr(item, "parent_content", "") or item.content,
+                        child_preview=item.content[:240],
+                        child_start_offset=getattr(item, "start_offset", 0),
+                        child_end_offset=getattr(item, "end_offset", len(item.content)),
+                        score=item.score,
+                    )
+                )
+            citations_tuple = tuple(citations_list)
+
             completed = replace(
                 prepared.assistant_message,
                 status=MessageStatus.COMPLETE,
                 content=content,
-                citations=(),
+                citations=citations_tuple,
                 updated_at=self._clock(),
             )
 
             await self._remember_completed_turn(prepared)
             if prepared.is_regeneration:
-                await self._repository.complete_message(completed, ())
+                await self._repository.complete_message(completed, citations_tuple)
             else:
                 await self._repository.commit_turn(
                     prepared.conversation,
                     prepared.user_message,
                     completed,
-                    (),
+                    citations_tuple,
                 )
 
             yield AnswerStreamEvent(
                 "done",
                 message=completed,
                 user_message=prepared.user_message,
-                citations=(),
+                citations=citations_tuple,
             )
         except asyncio.CancelledError:
             self._logger.info(
