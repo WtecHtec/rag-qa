@@ -6,12 +6,11 @@
 import logging
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from pydantic import SecretStr
 
 from app.core.config import Settings
-from app.modules.chat.query_router import QueryRouter
 from app.modules.settings.schemas import (
     ChunkingConfig,
     EmbeddingConfig,
@@ -22,7 +21,6 @@ from app.modules.settings.schemas import (
     SystemSettingsRead,
     SystemSettingsUpdate,
 )
-from app.providers.intent.llm_intent_classifier import LlmIntentClassifier
 from app.providers.llm.factory import LlmProviderFactory, LlmRuntimeConfig
 
 if TYPE_CHECKING:
@@ -173,28 +171,6 @@ class SettingsService:
             )
         )
         self._chat_service.set_llm_provider(new_llm_provider)
-
-        intent_classifier = None
-        if self._settings.intent_classifier_enabled:
-            intent_llm_provider = llm_factory.create(
-                LlmRuntimeConfig(
-                    provider=self._settings.llm_provider,
-                    api_key=api_key,
-                    base_url=self._settings.llm_base_url,
-                    model=self._settings.intent_model or self._settings.llm_model,
-                    timeout_seconds=self._settings.intent_timeout_seconds,
-                    max_tokens=self._settings.intent_max_tokens,
-                    temperature=0,
-                )
-            )
-            intent_classifier = LlmIntentClassifier(intent_llm_provider)
-
-        new_query_router = QueryRouter(
-            intent_classifier,
-            timeout_seconds=self._settings.intent_timeout_seconds,
-            confidence_threshold=self._settings.intent_confidence_threshold,
-        )
-        self._chat_service.set_query_router(new_query_router)
         self._chat_service.set_rag_top_k(self._settings.rag_top_k)
 
     def _persist_to_env(self) -> None:

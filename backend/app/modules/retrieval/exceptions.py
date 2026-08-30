@@ -1,20 +1,15 @@
-class RetrievalError(Exception):
-    """检索模块可预期异常基类。"""
+"""兼容导出：检索异常已归入 domain 目录。"""
 
-    code = "retrieval_error"
+from app.modules.retrieval.domain.exceptions import (
+    EmbeddingProviderError,
+    RetrievalError,
+    RetrievalValidationError,
+    VectorStoreError,
+)
 
-    def __init__(self, message: str) -> None:
-        super().__init__(message)
-        self.message = message
-
-
-class RetrievalValidationError(RetrievalError):
-    code = "retrieval_validation_error"
-
-
-class EmbeddingProviderError(RetrievalError):
-    code = "embedding_provider_error"
-
-
-class VectorStoreError(RetrievalError):
-    code = "vector_store_error"
+__all__ = [
+    "EmbeddingProviderError",
+    "RetrievalError",
+    "RetrievalValidationError",
+    "VectorStoreError",
+]

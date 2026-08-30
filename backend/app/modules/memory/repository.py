@@ -1,9 +1,5 @@
-from collections.abc import Sequence
-from typing import Protocol
+"""兼容导出：仓储协议已归入 domain 目录。"""
 
-from app.modules.memory.models import Memory
+from app.modules.memory.domain.repository import MemoryRepository
 
-
-class MemoryRepository(Protocol):
-    async def upsert(self, memory: Memory) -> None: ...
-    async def list_recent(self, *, limit: int) -> Sequence[Memory]: ...
+__all__ = ["MemoryRepository"]

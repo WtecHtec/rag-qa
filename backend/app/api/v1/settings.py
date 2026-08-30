@@ -4,6 +4,7 @@
 """
 
 from typing import Annotated
+
 from fastapi import APIRouter, Depends
 
 from app.api.dependencies import get_settings_service

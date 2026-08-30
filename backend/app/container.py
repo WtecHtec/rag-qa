@@ -15,7 +15,6 @@ from app.infrastructure.repositories.sqlite_knowledge_base_repository import (
 from app.infrastructure.repositories.sqlite_memory_repository import SqliteMemoryRepository
 from app.infrastructure.storage.local_document_storage import LocalDocumentStorage
 from app.infrastructure.vector_stores.lancedb_vector_store import LanceDbVectorStore
-from app.modules.chat.query_router import QueryRouter
 from app.modules.chat.service import ChatService
 from app.modules.diagnostics.service import DiagnosticsService
 from app.modules.documents.service import DocumentService
@@ -25,7 +24,6 @@ from app.modules.retrieval.service import RetrievalService
 from app.modules.settings.service import SettingsService
 from app.providers.chunking.text_chunker import ParentChildTextChunker
 from app.providers.embedding.fastembed_embedding import FastEmbedEmbeddingProvider
-from app.providers.intent.llm_intent_classifier import LlmIntentClassifier
 from app.providers.llm.factory import LlmProviderFactory, LlmRuntimeConfig
 
 StartupHook = Callable[[], Awaitable[None]]
@@ -92,20 +90,6 @@ def build_default_container(settings: Settings) -> AppContainer:
             temperature=settings.llm_temperature,
         )
     )
-    intent_classifier = None
-    if settings.intent_classifier_enabled:
-        intent_llm_provider = llm_factory.create(
-            LlmRuntimeConfig(
-                provider=settings.llm_provider,
-                api_key=api_key,
-                base_url=settings.llm_base_url,
-                model=settings.intent_model or settings.llm_model,
-                timeout_seconds=settings.intent_timeout_seconds,
-                max_tokens=settings.intent_max_tokens,
-                temperature=0,
-            )
-        )
-        intent_classifier = LlmIntentClassifier(intent_llm_provider)
     chat_service = ChatService(
         conversation_repository,
         document_repository,
@@ -113,11 +97,6 @@ def build_default_container(settings: Settings) -> AppContainer:
         llm_provider,
         rag_top_k=settings.rag_top_k,
         memory_service=MemoryService(memory_repository),
-        query_router=QueryRouter(
-            intent_classifier,
-            timeout_seconds=settings.intent_timeout_seconds,
-            confidence_threshold=settings.intent_confidence_threshold,
-        ),
     )
     service = KnowledgeBaseService(repository, document_repository)
     document_service = DocumentService(
@@ -147,4 +126,3 @@ def build_default_container(settings: Settings) -> AppContainer:
             vector_migration.run,
         ),
     )
-

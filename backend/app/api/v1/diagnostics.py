@@ -4,6 +4,7 @@
 """
 
 from typing import Annotated
+
 from fastapi import APIRouter, Depends, Query
 
 from app.api.dependencies import get_diagnostics_service

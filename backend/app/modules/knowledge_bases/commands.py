@@ -1,15 +1,8 @@
-from dataclasses import dataclass
+"""兼容导出：命令数据载体已归入 domain 目录。"""
 
+from app.modules.knowledge_bases.domain.commands import (
+    CreateKnowledgeBaseCommand,
+    UpdateKnowledgeBaseCommand,
+)
 
-@dataclass(frozen=True, slots=True)
-class CreateKnowledgeBaseCommand:
-    name: str
-    description: str = ""
-
-
-@dataclass(frozen=True, slots=True)
-class UpdateKnowledgeBaseCommand:
-    """None 表示保持不变，空字符串可用于清空描述。"""
-
-    name: str | None = None
-    description: str | None = None
+__all__ = ["CreateKnowledgeBaseCommand", "UpdateKnowledgeBaseCommand"]
