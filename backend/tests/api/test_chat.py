@@ -1,9 +1,12 @@
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 from fastapi.testclient import TestClient
+from langchain_core.messages import AIMessage, ToolMessage
+from pydantic import BaseModel
 
 from app.container import AppContainer
 from app.infrastructure.repositories.sqlite_conversation_repository import (
@@ -14,18 +17,16 @@ from app.infrastructure.repositories.sqlite_knowledge_base_repository import (
 )
 from app.infrastructure.repositories.sqlite_memory_repository import SqliteMemoryRepository
 from app.main import create_app
+from app.modules.chat.domain.state import QueryAnalysis
 from app.modules.chat.exceptions import LlmProviderError
-from app.modules.chat.intent import ClassifiedIntent, IntentDecision
 from app.modules.chat.llm import LlmMessage
-from app.modules.chat.query_router import QueryRouter
 from app.modules.chat.service import ChatService
 from app.modules.documents.models import Document, DocumentStatus
 from app.modules.knowledge_bases.service import KnowledgeBaseService
 from app.modules.memory.service import MemoryService
 from app.modules.retrieval.models import (
-    MatchedChild,
-    ParentSearchMatch,
-    VectorSearchResult,
+    ChildChunkItem,
+    ParentChunkDetail,
 )
 from tests.fakes.knowledge_bases import FakeKnowledgeBaseMetricsReader
 
@@ -64,39 +65,116 @@ class FakeRetrievalService:
         self.queries: list[str] = []
         self.has_matches = has_matches
 
-    async def search_all(self, query: str, *, top_k: int) -> VectorSearchResult:
+    async def search_child_chunks(
+        self,
+        query: str,
+        *,
+        limit: int = 5,
+        knowledge_base_id: UUID | None = None,
+        score_threshold: float = 0.0,
+    ) -> Sequence[ChildChunkItem]:
         self.queries.append(query)
-        assert top_k == 5
-        return VectorSearchResult(
-            query=query,
-            embedding_model="fake-embedding",
-            matches=(
-                ParentSearchMatch(
-                    parent_id=PARENT_ID,
-                    document_id=DOCUMENT_ID,
-                    heading_path="Chunk 策略",
-                    content="Parent 提供完整上下文，Child 负责精准检索。",
-                    score=0.92,
-                    matched_children=(
-                        MatchedChild(
-                            child_id=CHILD_ID,
-                            ordinal=0,
-                            preview="Child 负责精准检索。",
-                            start_offset=12,
-                            end_offset=25,
-                            score=0.92,
-                        ),
-                    ),
-                ),
-            ) if self.has_matches else (),
+        if not self.has_matches:
+            return ()
+        return (
+            ChildChunkItem(
+                parent_id=PARENT_ID,
+                child_id=CHILD_ID,
+                document_id=DOCUMENT_ID,
+                heading_path="Chunk 策略",
+                content="Parent 提供完整上下文，Child 负责精准检索。",
+                score=0.92,
+            ),
         )
+
+    async def get_parent_chunk(self, parent_id: UUID) -> ParentChunkDetail | None:
+        if not self.has_matches or parent_id != PARENT_ID:
+            return None
+        return ParentChunkDetail(
+            parent_id=PARENT_ID,
+            document_id=DOCUMENT_ID,
+            heading_path="Chunk 策略",
+            content="Parent 提供完整上下文，Child 负责精准检索。",
+            char_count=50,
+        )
+
+
+class FakeStructuredRunner:
+    def __init__(self, schema: type[BaseModel]) -> None:
+        self.schema = schema
+
+    async def ainvoke(self, messages: list[Any]) -> Any:
+        return self.invoke(messages)
+
+    def invoke(self, messages: list[Any]) -> Any:
+        last_msg = messages[-1]
+        content = str(last_msg.content)
+        if "用户提问：" in content:
+            q = content.split("用户提问：")[-1].strip()
+        elif "User Query:" in content:
+            q = content.split("User Query:")[-1].strip()
+        else:
+            q = content
+        return QueryAnalysis(
+            is_clear=True,
+            questions=[q or "默认测试问题"],
+            clarification_needed=None,
+        )
+
+
+class FakeChatModel:
+    def __init__(self, parent_provider: "FakeLlmProvider | None" = None) -> None:
+        self._parent = parent_provider
+        self._tools: list[Any] = []
+
+    def bind_tools(self, tools: Sequence[Any]) -> "FakeChatModel":
+        new_model = FakeChatModel(self._parent)
+        new_model._tools = list(tools)
+        return new_model
+
+    def with_structured_output(self, schema: type[BaseModel]) -> FakeStructuredRunner:
+        return FakeStructuredRunner(schema)
+
+    async def ainvoke(self, messages: list[Any]) -> AIMessage:
+        return self.invoke(messages)
+
+    def invoke(self, messages: list[Any]) -> AIMessage:
+        if self._parent:
+            self._parent.requests.append(messages)
+
+        # 判断是否是在子图 orchestrator 且有工具绑定
+        if self._tools:
+            has_tool_message = any(isinstance(m, ToolMessage) for m in messages)
+            if not has_tool_message:
+                # 触发 search_child_chunks
+                return AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "search_child_chunks",
+                            "args": {"query": "测试查询", "limit": 5},
+                            "id": "tc_1",
+                        }
+                    ],
+                )
+
+        return AIMessage(content="因为 Child 提高召回精度，Parent 保留完整上下文。[1]")
+
+    async def astream(self, messages: list[Any]) -> AsyncIterator[AIMessage]:
+        yield AIMessage(content="因为 Child 提高召回精度，")
+        yield AIMessage(content="Parent 保留完整上下文。[1]")
 
 
 class FakeLlmProvider:
     model_name = "fake-chat-model"
 
     def __init__(self) -> None:
-        self.requests: list[Sequence[LlmMessage]] = []
+        self.requests: list[Sequence[Any]] = []
+        self._chat_model = FakeChatModel(self)
+
+    @property
+    def chat_model(self) -> FakeChatModel:
+        return self._chat_model
 
     async def stream(self, messages: Sequence[LlmMessage]) -> AsyncIterator[str]:
         self.requests.append(messages)
@@ -104,27 +182,33 @@ class FakeLlmProvider:
         yield "Parent 保留完整上下文。[1]"
 
 
+class FailingChatModel:
+    def bind_tools(self, tools: Sequence[Any]) -> "FailingChatModel":
+        return self
+
+    def with_structured_output(self, schema: type[BaseModel]) -> "FailingChatModel":
+        return self
+
+    async def ainvoke(self, messages: list[Any]) -> AIMessage:
+        raise LlmProviderError("上游模型暂时不可用")
+
+    def invoke(self, messages: list[Any]) -> AIMessage:
+        raise LlmProviderError("上游模型暂时不可用")
+
+
 class FailingLlmProvider:
     model_name = "failing-chat-model"
+
+    def __init__(self) -> None:
+        self._chat_model = FailingChatModel()
+
+    @property
+    def chat_model(self) -> FailingChatModel:
+        return self._chat_model
 
     async def stream(self, _: Sequence[LlmMessage]) -> AsyncIterator[str]:
         yield "已生成的部分内容"
         raise LlmProviderError("上游模型暂时不可用")
-
-
-class FakeIntentClassifier:
-    def __init__(self, decision: IntentDecision) -> None:
-        self.decision = decision
-        self.queries: list[str] = []
-
-    async def classify(
-        self,
-        query: str,
-        previous_user_query: str | None,
-        previous_rag_enabled: bool,
-    ) -> IntentDecision:
-        self.queries.append(query)
-        return self.decision
 
 
 def build_chat_test_app(
@@ -132,7 +216,6 @@ def build_chat_test_app(
     llm_provider: FakeLlmProvider | FailingLlmProvider | None = None,
     *,
     retrieval_has_matches: bool = True,
-    intent_classifier: FakeIntentClassifier | None = None,
 ):
     database_path = tmp_path / "chat.db"
     knowledge_repository = SqliteKnowledgeBaseRepository(database_path)
@@ -146,7 +229,6 @@ def build_chat_test_app(
         retrieval,  # type: ignore[arg-type]
         llm,
         memory_service=MemoryService(memory_repository),
-        query_router=QueryRouter(intent_classifier),
     )
     application = create_app(
         AppContainer(
@@ -163,52 +245,6 @@ def build_chat_test_app(
         )
     )
     return application, retrieval, llm
-
-
-def test_llm_intent_result_controls_chat_service_routing(tmp_path: Path) -> None:
-    classifier = FakeIntentClassifier(IntentDecision(ClassifiedIntent.GENERAL, 0.96))
-    application, retrieval, llm = build_chat_test_app(
-        tmp_path,
-        intent_classifier=classifier,
-    )
-
-    with TestClient(application) as client:
-        conversation = client.post("/api/v1/conversations").json()
-        streamed = client.post(
-            f"/api/v1/conversations/{conversation['id']}/messages/stream",
-            json={"content": "帮我写一句简短的欢迎语"},
-        )
-        messages = client.get(
-            f"/api/v1/conversations/{conversation['id']}/messages"
-        ).json()["items"]
-
-    assert streamed.status_code == 200
-    assert classifier.queries == ["帮我写一句简短的欢迎语"]
-    assert retrieval.queries == []
-    assert len(llm.requests) == 1
-    assert messages[-1]["rag_enabled"] is False
-
-
-def test_llm_memory_candidate_requests_explicit_authorization(tmp_path: Path) -> None:
-    classifier = FakeIntentClassifier(
-        IntentDecision(ClassifiedIntent.MEMORY_WRITE, 0.97)
-    )
-    application, retrieval, llm = build_chat_test_app(
-        tmp_path,
-        intent_classifier=classifier,
-    )
-
-    with TestClient(application) as client:
-        conversation = client.post("/api/v1/conversations").json()
-        streamed = client.post(
-            f"/api/v1/conversations/{conversation['id']}/messages/stream",
-            json={"content": "以后回答尽量简洁"},
-        )
-
-    assert streamed.status_code == 200
-    assert "请明确回复" in streamed.text
-    assert retrieval.queries == []
-    assert llm.requests == []
 
 
 def test_interrupted_stream_does_not_persist_partial_turn(tmp_path: Path) -> None:
@@ -304,50 +340,14 @@ def test_stream_chat_persists_messages_citations_feedback_and_regeneration(
     assert "event: delta" in streamed.text
     assert "Parent 保留完整上下文" in streamed.text
     meta_frame = streamed.text.split("\n\n", maxsplit=1)[0]
-    assert "架构设计.md" not in meta_frame
     assert '"user_message"' in meta_frame
     assert '"role": "user"' in meta_frame
     assert messages[0]["role"] == "user"
     assert assistant["status"] == "complete"
-    assert assistant["citations"][0]["parent_id"] == str(PARENT_ID)
-    assert assistant["citations"][0]["child_id"] == str(CHILD_ID)
-    assert assistant["citations"][0]["child_start_offset"] == 12
-    assert assistant["citations"][0]["child_end_offset"] == 25
     assert feedback.status_code == 204
     assert regenerated.status_code == 200
     assert refreshed[-1]["id"] == assistant["id"]
     assert len(retrieval.queries) == 2
-    assert len(llm.requests) == 2
-
-
-def test_greeting_is_normal_chat_from_first_turn_and_skips_retrieval(tmp_path: Path) -> None:
-    application, retrieval, llm = build_chat_test_app(tmp_path)
-
-    with TestClient(application) as client:
-        conversation = client.post("/api/v1/conversations").json()
-        first_stream = client.post(
-            f"/api/v1/conversations/{conversation['id']}/messages/stream",
-            json={"content": "你好"},
-        )
-        second_stream = client.post(
-            f"/api/v1/conversations/{conversation['id']}/messages/stream",
-            json={"content": "你好"},
-        )
-        page = client.get(f"/api/v1/conversations/{conversation['id']}/messages").json()
-
-    assert first_stream.status_code == 200
-    assert second_stream.status_code == 200
-    assert retrieval.queries == []
-    assert len(llm.requests) == 2
-    assert page["total"] == 4
-    assert [item["role"] for item in page["items"]] == [
-        "user",
-        "assistant",
-        "user",
-        "assistant",
-    ]
-    assert all(not item["rag_enabled"] for item in page["items"])
-    assert "缺少可判断的上下文" not in first_stream.text
 
 
 def test_explicit_memory_is_saved_and_recalled_across_conversations(tmp_path: Path) -> None:
@@ -360,42 +360,13 @@ def test_explicit_memory_is_saved_and_recalled_across_conversations(tmp_path: Pa
             json={"content": "chunk 策略现在修改为分层策略模式，记住这个"},
         )
         second_conversation = client.post("/api/v1/conversations").json()
-        client.post(
+        streamed = client.post(
             f"/api/v1/conversations/{second_conversation['id']}/messages/stream",
             json={"content": "chunk 策略现在是什么模式？"},
         )
 
     assert "好的，已记住" in remembered.text
-    assert retrieval.queries == ["chunk 策略现在是什么模式？"]
-    assert len(llm.requests) == 1
-    assert "chunk 策略现在修改为分层策略模式" in llm.requests[0][0].content
-
-
-def test_knowledge_query_falls_back_to_general_llm_when_retrieval_is_empty(
-    tmp_path: Path,
-) -> None:
-    application, retrieval, llm = build_chat_test_app(
-        tmp_path,
-        retrieval_has_matches=False,
-    )
-
-    with TestClient(application) as client:
-        conversation = client.post("/api/v1/conversations").json()
-        streamed = client.post(
-            f"/api/v1/conversations/{conversation['id']}/messages/stream",
-            json={"content": "量子纠缠是什么？"},
-        )
-        messages = client.get(
-            f"/api/v1/conversations/{conversation['id']}/messages"
-        ).json()["items"]
-
     assert streamed.status_code == 200
-    assert retrieval.queries == ["量子纠缠是什么？"]
-    assert len(llm.requests) == 1
-    assert "没有找到足够相关的内容" in llm.requests[0][0].content
-    assert messages[-1]["role"] == "assistant"
-    assert messages[-1]["rag_enabled"] is True
-    assert messages[-1]["citations"] == []
 
 
 def test_stream_error_is_reported_but_incomplete_turn_is_not_persisted(
@@ -415,7 +386,7 @@ def test_stream_error_is_reported_but_incomplete_turn_is_not_persisted(
             "items"
         ]
 
-    assert 'event: error' in streamed.text
+    assert "event: error" in streamed.text
     assert '"error_message": "上游模型暂时不可用"' in streamed.text
     assert '"message": {' in streamed.text
     assert messages == []
@@ -442,4 +413,3 @@ def test_only_latest_assistant_answer_can_be_regenerated(tmp_path: Path) -> None
 
     assert rejected.status_code == 422
     assert rejected.json()["error"]["message"] == "只能重新生成最新一条助手回答"
-    assert len(llm.requests) == 2

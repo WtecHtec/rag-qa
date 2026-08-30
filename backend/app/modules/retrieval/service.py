@@ -11,7 +11,9 @@ from app.modules.documents.repository import KnowledgeBaseReader
 from app.modules.retrieval.embedding import EmbeddingProvider
 from app.modules.retrieval.exceptions import EmbeddingProviderError, RetrievalValidationError
 from app.modules.retrieval.models import (
+    ChildChunkItem,
     MatchedChild,
+    ParentChunkDetail,
     ParentSearchMatch,
     VectorHit,
     VectorRecord,
@@ -242,8 +244,74 @@ class RetrievalService:
         )
         return result
 
+    async def search_child_chunks(
+        self,
+        query: str,
+        *,
+        limit: int = 5,
+        knowledge_base_id: UUID | None = None,
+        score_threshold: float = 0.0,
+    ) -> Sequence[ChildChunkItem]:
+        """第一阶段细粒度子块向量检索，为 Agent 初筛提供关键线索及父块 ID。"""
+        normalized_query = query.strip()
+        if not normalized_query:
+            return ()
+        if limit < 1 or limit > 50:
+            raise RetrievalValidationError("检索数量限制必须在 1 到 50 之间")
+
+        query_embedding = await self._embedding_provider.embed_query(normalized_query)
+        self._validate_embeddings((query_embedding,), 1)
+
+        hits = await self._vector_store.search(
+            knowledge_base_id,
+            query_embedding,
+            embedding_model=self._embedding_provider.model_name,
+            limit=limit,
+        )
+        if not hits:
+            return ()
+
+        # 过滤低于分数阈值的命中
+        valid_hits = [hit for hit in hits if hit.score >= score_threshold]
+        if not valid_hits:
+            return ()
+
+        child_ids = [hit.child_id for hit in valid_hits]
+        chunks = await self._chunk_reader.get_chunks(child_ids)
+
+        items: list[ChildChunkItem] = []
+        for hit in valid_hits:
+            child = chunks.get(hit.child_id)
+            if child is None or child.kind is not ChunkKind.CHILD or child.parent_id is None:
+                continue
+            items.append(
+                ChildChunkItem(
+                    parent_id=child.parent_id,
+                    child_id=child.id,
+                    document_id=child.document_id,
+                    heading_path=child.heading_path,
+                    content=child.content,
+                    score=hit.score,
+                )
+            )
+        return tuple(items)
+
+    async def get_parent_chunk(self, parent_id: UUID) -> ParentChunkDetail | None:
+        """第二阶段按需提取父块大上下文，供 Agent 深入阅读完整段落。"""
+        chunk = await self._chunk_reader.get_chunk(parent_id)
+        if chunk is None or chunk.kind is not ChunkKind.PARENT:
+            return None
+        return ParentChunkDetail(
+            parent_id=chunk.id,
+            document_id=chunk.document_id,
+            heading_path=chunk.heading_path,
+            content=chunk.content,
+            char_count=chunk.char_count,
+        )
+
     def _validate_embeddings(self, embeddings: Sequence[tuple[float, ...]], expected: int) -> None:
         if len(embeddings) != expected:
             raise EmbeddingProviderError("Embedding Provider 返回数量与输入不一致")
         if any(len(item) != self._embedding_provider.dimensions for item in embeddings):
             raise EmbeddingProviderError("Embedding Provider 返回维度不一致")
+

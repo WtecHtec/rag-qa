@@ -1,44 +1,36 @@
+from __future__ import annotations
+
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID, uuid4
 
-from app.modules.chat.citation_selector import select_cited_sources
-from app.modules.chat.exceptions import (
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+
+from app.modules.chat.domain import (
     ChatError,
-    ChatValidationError,
-    ConversationNotFoundError,
-    MessageNotFoundError,
-)
-from app.modules.chat.llm import LlmMessage, LlmProvider
-from app.modules.chat.models import (
     ChatMessage,
     ChatMessagePage,
+    ChatValidationError,
     Citation,
     Conversation,
+    ConversationNotFoundError,
     ConversationPage,
     FeedbackRating,
+    LlmMessage,
+    LlmProvider,
+    MessageNotFoundError,
     MessageRole,
     MessageStatus,
 )
-from app.modules.chat.prompt_builder import (
-    build_general_chat_messages,
-    build_knowledge_fallback_messages,
-    build_llm_messages,
-)
-from app.modules.chat.query_router import QueryRouter
-from app.modules.chat.query_strategy import (
-    QueryIntent,
-    QueryPlan,
-    find_latest_answer_rag_mode,
-    find_latest_user_query,
-)
-from app.modules.chat.repository import ConversationRepository
+from app.modules.chat.domain.repository import ConversationRepository
+from app.modules.chat.graph_builder import create_agentic_rag_graph
+from app.modules.chat.tools.retrieval_tools import create_retrieval_tools
 from app.modules.documents.repository import DocumentRepository
 from app.modules.memory.service import MemoryService
-from app.modules.retrieval.models import VectorSearchResult
 from app.modules.retrieval.service import RetrievalService
 
 Clock = Callable[[], datetime]
@@ -73,7 +65,7 @@ class AnswerStreamEvent:
 
 
 class ChatService:
-    """编排会话持久化、查询重写、RAG 检索、上下文构建和 LLM 流式输出。"""
+    """Chat 领域应用服务：编排会话持久化、记忆提取、LangGraph Agentic RAG 图流式执行与事件分发。"""
 
     def __init__(
         self,
@@ -84,7 +76,6 @@ class ChatService:
         *,
         rag_top_k: int = 5,
         memory_service: MemoryService | None = None,
-        query_router: QueryRouter | None = None,
         clock: Clock = utc_now,
         id_factory: IdFactory = uuid4,
         logger: logging.Logger | None = None,
@@ -95,7 +86,6 @@ class ChatService:
         self._llm_provider = llm_provider
         self._rag_top_k = rag_top_k
         self._memory_service = memory_service
-        self._query_router = query_router or QueryRouter()
         self._clock = clock
         self._id_factory = id_factory
         self._logger = logger or logging.getLogger(__name__)
@@ -104,13 +94,15 @@ class ChatService:
         """运行期热替换 LLM 大模型 Provider。"""
         self._llm_provider = llm_provider
 
-    def set_query_router(self, query_router: QueryRouter) -> None:
-        """运行期热替换查询路由与意图分类器。"""
-        self._query_router = query_router
-
     def set_rag_top_k(self, rag_top_k: int) -> None:
         """运行期热替换 RAG 检索 TopK 参数。"""
         self._rag_top_k = rag_top_k
+
+    def _get_chat_model(self) -> Any:
+        """获取底层供 LangGraph 和 Tool 使用的统一模型实例。"""
+        if hasattr(self._llm_provider, "chat_model"):
+            return self._llm_provider.chat_model
+        return self._llm_provider
 
     async def create_conversation(self) -> Conversation:
         now = self._clock()
@@ -178,26 +170,8 @@ class ChatService:
         normalized = self._validate_content(content)
         conversation = await self.get_conversation(conversation_id)
         history = tuple(await self._repository.list_messages(conversation_id))
-        previous_query = find_latest_user_query(history)
-        memory_content = self._memory_service.extract(normalized) if self._memory_service else None
-        query_plan = (
-            QueryPlan(QueryIntent.GENERAL, normalized)
-            if memory_content is not None
-            else await self._query_router.route(
-                normalized,
-                previous_query,
-                find_latest_answer_rag_mode(history),
-            )
-        )
-        self._logger.info(
-            "chat.turn_started",
-            extra={
-                "conversation_id": str(conversation_id),
-                "intent": query_plan.intent.value,
-                "retrieval_query": query_plan.retrieval_query,
-            },
-        )
         now = self._clock()
+
         user_message = self._new_message(
             conversation.id,
             MessageRole.USER,
@@ -205,22 +179,23 @@ class ChatService:
             normalized,
             now,
         )
-        assistant_role = (
-            MessageRole.CLARIFICATION
-            if query_plan.intent
-            in (QueryIntent.CLARIFICATION, QueryIntent.MEMORY_CONFIRMATION)
-            else MessageRole.ASSISTANT
+
+        memory_content = (
+            self._memory_service.extract(normalized)
+            if self._memory_service
+            else None
         )
+
         assistant_message = self._new_message(
             conversation.id,
-            assistant_role,
+            MessageRole.ASSISTANT,
             MessageStatus.GENERATING,
             "",
             now,
-            rewritten_query=query_plan.retrieval_query,
             model=self._llm_provider.model_name,
-            rag_enabled=query_plan.use_rag,
+            rag_enabled=True,
         )
+
         if conversation.title == "新对话":
             conversation = replace(
                 conversation,
@@ -229,6 +204,7 @@ class ChatService:
             )
         else:
             conversation = replace(conversation, updated_at=now)
+
         if memory_content is not None and self._memory_service is not None:
             return PreparedAnswer(
                 conversation,
@@ -239,41 +215,14 @@ class ChatService:
                 f"好的，已记住：{memory_content}",
                 memory_content=memory_content,
             )
-        if assistant_role is MessageRole.CLARIFICATION:
-            direct_answer = (
-                "如果希望我长期保存这条信息，请明确回复“记住：要保存的内容”。"
-                if query_plan.intent is QueryIntent.MEMORY_CONFIRMATION
-                else "这个问题缺少可判断的上下文，请补充具体对象或完整问题后再试。"
-            )
-            return PreparedAnswer(
-                conversation,
-                user_message,
-                assistant_message,
-                (),
-                (),
-                direct_answer,
-            )
-        if query_plan.intent is QueryIntent.GENERAL:
-            memories = await self._prompt_memories()
-            return PreparedAnswer(
-                conversation,
-                user_message,
-                assistant_message,
-                (),
-                build_general_chat_messages(
-                    history,
-                    user_message.content,
-                    memories=memories,
-                ),
-                None,
-            )
-        return await self._prepare_with_retrieval(
+
+        return PreparedAnswer(
             conversation,
             user_message,
             assistant_message,
-            history,
-            query_plan.retrieval_query,
-            await self._prompt_memories(),
+            (),
+            (),
+            None,
         )
 
     async def prepare_regeneration(
@@ -292,6 +241,7 @@ class ChatService:
         target = messages[target_index]
         if target.role not in (MessageRole.ASSISTANT, MessageRole.CLARIFICATION):
             raise ChatValidationError("只能重新生成助手回答")
+
         latest_answer = next(
             (
                 message
@@ -301,8 +251,8 @@ class ChatService:
             None,
         )
         if latest_answer is None or latest_answer.id != target.id:
-            # 重新生成会覆盖原消息；只允许最新回答可避免改写中间历史导致上下文分叉。
             raise ChatValidationError("只能重新生成最新一条助手回答")
+
         user_index = next(
             (
                 index
@@ -313,41 +263,28 @@ class ChatService:
         )
         if user_index is None:
             raise ChatValidationError("回答缺少对应的用户问题")
+
         user_message = messages[user_index]
-        previous_query = find_latest_user_query(messages[:user_index])
         memory_content = (
             self._memory_service.extract(user_message.content)
             if self._memory_service
             else None
         )
-        query_plan = (
-            QueryPlan(QueryIntent.GENERAL, user_message.content)
-            if memory_content is not None
-            else await self._query_router.route(
-                user_message.content,
-                previous_query,
-                find_latest_answer_rag_mode(messages[:user_index]),
-            )
-        )
+
         generating = replace(
             target,
-            role=(
-                MessageRole.CLARIFICATION
-                if query_plan.intent
-                in (QueryIntent.CLARIFICATION, QueryIntent.MEMORY_CONFIRMATION)
-                else MessageRole.ASSISTANT
-            ),
+            role=MessageRole.ASSISTANT,
             status=MessageStatus.GENERATING,
             content="",
-            rewritten_query=query_plan.retrieval_query,
             model=self._llm_provider.model_name,
             error_code=None,
             error_message=None,
-            rag_enabled=query_plan.use_rag,
+            rag_enabled=True,
             citations=(),
             updated_at=self._clock(),
             is_regenerate=True,
         )
+
         if memory_content is not None:
             return PreparedAnswer(
                 conversation,
@@ -358,46 +295,14 @@ class ChatService:
                 f"好的，已记住：{memory_content}",
                 True,
             )
-        if query_plan.intent in (
-            QueryIntent.CLARIFICATION,
-            QueryIntent.MEMORY_CONFIRMATION,
-        ):
-            direct_answer = (
-                "如果希望我长期保存这条信息，请明确回复“记住：要保存的内容”。"
-                if query_plan.intent is QueryIntent.MEMORY_CONFIRMATION
-                else "这个问题缺少可判断的上下文，请补充具体对象或完整问题后再试。"
-            )
-            return PreparedAnswer(
-                conversation,
-                user_message,
-                generating,
-                (),
-                (),
-                direct_answer,
-                True,
-            )
-        if query_plan.intent is QueryIntent.GENERAL:
-            memories = await self._prompt_memories()
-            return PreparedAnswer(
-                conversation,
-                user_message,
-                generating,
-                (),
-                build_general_chat_messages(
-                    messages[:user_index],
-                    user_message.content,
-                    memories=memories,
-                ),
-                None,
-                True,
-            )
-        return await self._prepare_with_retrieval(
+
+        return PreparedAnswer(
             conversation,
             user_message,
             generating,
-            messages[:user_index],
-            query_plan.retrieval_query,
-            await self._prompt_memories(),
+            (),
+            (),
+            None,
             is_regeneration=True,
         )
 
@@ -405,60 +310,93 @@ class ChatService:
         self,
         prepared: PreparedAnswer,
     ) -> AsyncIterator[AnswerStreamEvent]:
-        # meta 只确认服务端消息身份；检索候选必须等正文实际引用后才能暴露给前端。
+        """通过 LangGraph 异步驱动 Agentic RAG 双层状态机并实时推送流式事件。"""
         yield AnswerStreamEvent(
             "meta",
             message=prepared.assistant_message,
             user_message=prepared.user_message,
         )
+
         parts: list[str] = []
-        import time
-        llm_start = time.perf_counter()
         try:
             if prepared.direct_answer is not None:
                 parts.append(prepared.direct_answer)
                 yield AnswerStreamEvent("delta", delta=prepared.direct_answer)
             else:
-                async for delta in self._llm_provider.stream(prepared.llm_messages):
-                    parts.append(delta)
-                    yield AnswerStreamEvent("delta", delta=delta)
+                # 1. 组装输入历史
+                history = tuple(
+                    await self._repository.list_messages(prepared.conversation.id)
+                )
+                input_messages: list[BaseMessage] = []
+                for msg in history:
+                    if msg.role == MessageRole.USER:
+                        input_messages.append(HumanMessage(content=msg.content))
+                    elif msg.role in (MessageRole.ASSISTANT, MessageRole.CLARIFICATION):
+                        if msg.content:
+                            input_messages.append(AIMessage(content=msg.content))
+                # 追加当前用户提问
+                input_messages.append(HumanMessage(content=prepared.user_message.content))
+
+                # 2. 构建领域检索工具与 LangGraph 双层图
+                tools = create_retrieval_tools(self._retrieval_service)
+                graph = create_agentic_rag_graph(self._get_chat_model(), tools)
+
+                # 3. 驱动 LangGraph 异步流式执行
+                current_state_messages = input_messages
+                thread_config = {"configurable": {"thread_id": str(prepared.conversation.id)}}
+                async for update in graph.astream(
+                    {"messages": current_state_messages},
+                    config=thread_config,
+                    stream_mode="updates",
+                ):
+                    for node_name, node_output in update.items():
+                        if node_name == "rewrite_query":
+                            if not node_output.get("questionIsClear", True):
+                                clarification_msgs = node_output.get("messages", [])
+                                for m in clarification_msgs:
+                                    if isinstance(m, AIMessage) and m.content:
+                                        content_str = str(m.content)
+                                        parts.append(content_str)
+                                        yield AnswerStreamEvent("delta", delta=content_str)
+                        elif node_name == "aggregate_answers":
+                            agg_msgs = node_output.get("messages", [])
+                            for m in agg_msgs:
+                                if isinstance(m, AIMessage) and m.content:
+                                    content_str = str(m.content)
+                                    parts.append(content_str)
+                                    yield AnswerStreamEvent("delta", delta=content_str)
+
             content = "".join(parts).strip()
-            llm_latency = round((time.perf_counter() - llm_start) * 1000, 2)
-            cited_sources = select_cited_sources(content, prepared.citations)
+            if not content:
+                content = "未能从文档中检索到有效回答。"
+                yield AnswerStreamEvent("delta", delta=content)
+
             completed = replace(
                 prepared.assistant_message,
                 status=MessageStatus.COMPLETE,
                 content=content,
-                citations=cited_sources,
+                citations=(),
                 updated_at=self._clock(),
             )
+
             await self._remember_completed_turn(prepared)
             if prepared.is_regeneration:
-                await self._repository.complete_message(completed, cited_sources)
+                await self._repository.complete_message(completed, ())
             else:
-                # 首次问答只在完整生成后原子提交，取消请求不会留下半轮消息。
                 await self._repository.commit_turn(
                     prepared.conversation,
                     prepared.user_message,
                     completed,
-                    cited_sources,
+                    (),
                 )
-            trace_id = f"trc-{str(prepared.assistant_message.id)[:8]}"
-            try:
-                await self._repository.update_retrieval_trace_response(
-                    trace_id=trace_id,
-                    ai_response=content,
-                    llm_latency_ms=llm_latency,
-                )
-            except Exception as e:
-                self._logger.warning("update_retrieval_trace_response.failed: %s", e)
+
             yield AnswerStreamEvent(
                 "done",
                 message=completed,
-                citations=cited_sources,
+                user_message=prepared.user_message,
+                citations=(),
             )
         except asyncio.CancelledError:
-            # 主动停止、切换路由或刷新都视为放弃本轮，不保存用户问题和部分回答。
             self._logger.info(
                 "chat.generation_stopped",
                 extra={"message_id": str(prepared.assistant_message.id)},
@@ -466,7 +404,6 @@ class ChatService:
             raise
         except Exception as error:
             partial_content = "".join(parts).strip()
-            cited_sources = select_cited_sources(partial_content, prepared.citations)
             failed = replace(
                 prepared.assistant_message,
                 status=MessageStatus.FAILED,
@@ -475,7 +412,7 @@ class ChatService:
                 error_message=(
                     error.message if isinstance(error, ChatError) else "回答生成失败，请查看日志"
                 ),
-                citations=cited_sources,
+                citations=(),
                 updated_at=self._clock(),
             )
             self._logger.exception(
@@ -513,142 +450,7 @@ class ChatService:
             },
         )
 
-    async def _prepare_with_retrieval(
-        self,
-        conversation: Conversation,
-        user_message: ChatMessage,
-        assistant_message: ChatMessage,
-        history: Sequence[ChatMessage],
-        retrieval_query: str,
-        memories: Sequence[str],
-        *,
-        is_regeneration: bool = False,
-    ) -> PreparedAnswer:
-        import time
-        start_time = time.perf_counter()
-        result = await self._retrieval_service.search_all(
-            retrieval_query,
-            top_k=self._rag_top_k,
-        )
-        retrieval_latency = round((time.perf_counter() - start_time) * 1000, 2)
-        citations = await self._build_citations(
-            assistant_message.id,
-            result,
-        )
-        import json
-        recalled_chunks = [
-            {
-                "document_name": c.document_name,
-                "heading_path": c.heading_path,
-                "score": c.score,
-                "child_preview": c.child_preview,
-                "parent_content": c.parent_content,
-            }
-            for c in citations
-        ]
-        recalled_chunks_json = json.dumps(recalled_chunks, ensure_ascii=False) if recalled_chunks else None
-        top_score = (
-            citations[0].score
-            if citations
-            else (result.matches[0].score if result.matches else None)
-        )
-        trace_id = f"trc-{str(assistant_message.id)[:8]}"
-        self._logger.info(
-            "rag.retrieval_completed",
-            extra={
-                "retrieval_query": retrieval_query,
-                "citations_count": len(citations),
-                "top_score": top_score,
-                "latency_ms": retrieval_latency,
-            },
-        )
-        try:
-            await self._repository.save_retrieval_trace(
-                trace_id=trace_id,
-                query=user_message.content,
-                rewritten_query=(
-                    retrieval_query
-                    if retrieval_query != user_message.content
-                    else None
-                ),
-                intent_category="Detail" if citations else "General",
-                retrieved_chunks_count=len(citations),
-                top_score=top_score,
-                retrieval_latency_ms=retrieval_latency,
-                recalled_chunks_json=recalled_chunks_json,
-            )
-        except Exception as e:
-            self._logger.warning("save_retrieval_trace.failed: %s", e)
-
-        if not citations:
-            return PreparedAnswer(
-                conversation,
-                user_message,
-                assistant_message,
-                (),
-                build_knowledge_fallback_messages(
-                    history,
-                    user_message.content,
-                    memories=memories,
-                ),
-                None,
-                is_regeneration,
-            )
-        llm_messages = build_llm_messages(
-            history,
-            user_message.content,
-            citations,
-            memories=memories,
-        )
-        return PreparedAnswer(
-            conversation,
-            user_message,
-            assistant_message,
-            citations,
-            llm_messages,
-            None,
-            is_regeneration,
-        )
-    async def _build_citations(
-        self,
-        message_id: UUID,
-        result: VectorSearchResult,
-    ) -> tuple[Citation, ...]:
-        documents = await asyncio.gather(
-            *(self._document_repository.get(match.document_id) for match in result.matches)
-        )
-        citations: list[Citation] = []
-        for match, document in zip(result.matches, documents, strict=True):
-            if document is None or not match.matched_children:
-                continue
-            child = match.matched_children[0]
-            citations.append(
-                Citation(
-                    id=self._id_factory(),
-                    message_id=message_id,
-                    knowledge_base_id=document.knowledge_base_id,
-                    document_id=match.document_id,
-                    parent_id=match.parent_id,
-                    child_id=child.child_id,
-                    citation_number=len(citations) + 1,
-                    document_name=document.filename,
-                    heading_path=match.heading_path,
-                    parent_content=match.content,
-                    child_preview=child.preview,
-                    child_start_offset=child.start_offset,
-                    child_end_offset=child.end_offset,
-                    score=match.score,
-                )
-            )
-        return tuple(citations)
-
-    async def _prompt_memories(self) -> tuple[str, ...]:
-        if self._memory_service is None:
-            return ()
-        return await self._memory_service.list_prompt_contents()
-
     async def _remember_completed_turn(self, prepared: PreparedAnswer) -> None:
-        """显式记忆也随完整轮次提交，中断回复不能提前产生长期副作用。"""
         if prepared.memory_content is None or self._memory_service is None:
             return
         remembered = await self._memory_service.remember(

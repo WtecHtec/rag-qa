@@ -70,6 +70,7 @@ async def test_settings_service_test_llm_connection(tmp_path):
 async def test_settings_service_hot_reload_llm(tmp_path):
     """测试设置更新时对 ChatService 运行期 LlmProvider 执行热更新。"""
     from unittest.mock import MagicMock
+
     from app.modules.chat.service import ChatService
 
     settings = Settings(
@@ -89,5 +90,5 @@ async def test_settings_service_hot_reload_llm(tmp_path):
     await service.update_settings(update_payload)
 
     assert chat_service_mock.set_llm_provider.called
-    assert chat_service_mock.set_query_router.called
+    assert chat_service_mock.set_rag_top_k.called
 

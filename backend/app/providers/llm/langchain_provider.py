@@ -40,7 +40,13 @@ class LangChainLlmProvider:
 
     @property
     def model_name(self) -> str:
+        """获取当前模型名称。"""
         return self._model_name
+
+    @property
+    def chat_model(self) -> AsyncChatModel:
+        """获取底层 ChatModel 实例，用于 LangGraph 节点和工具绑定。"""
+        return self._chat_model
 
     async def stream(self, messages: Sequence[LlmMessage]) -> AsyncIterator[str]:
         if self._configuration_error:
@@ -75,7 +81,11 @@ class LangChainLlmProvider:
 
             end_time = perf_counter()
             total_llm_latency_ms = round((end_time - start_time) * 1000, 2)
-            ttft_ms = round((first_token_at - start_time) * 1000, 2) if first_token_at else total_llm_latency_ms
+            ttft_ms = (
+                round((first_token_at - start_time) * 1000, 2)
+                if first_token_at
+                else total_llm_latency_ms
+            )
             self._logger.info(
                 "llm.langchain_stream_completed",
                 extra={

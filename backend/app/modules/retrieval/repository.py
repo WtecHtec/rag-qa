@@ -1,19 +1,5 @@
-from collections.abc import Mapping, Sequence
-from typing import Protocol
-from uuid import UUID
+"""兼容导出：仓储协议已归入 domain 目录。"""
 
-from app.modules.documents.models import TextChunk
+from app.modules.retrieval.domain.repository import RetrievalChunkReader
 
-
-class RetrievalChunkReader(Protocol):
-    """检索模块只读取 Child 批次和命中后的父子正文。"""
-
-    async def list_child_chunks(
-        self,
-        document_id: UUID,
-        *,
-        limit: int,
-        after_id: UUID | None,
-    ) -> Sequence[TextChunk]: ...
-
-    async def get_chunks(self, chunk_ids: Sequence[UUID]) -> Mapping[UUID, TextChunk]: ...
+__all__ = ["RetrievalChunkReader"]

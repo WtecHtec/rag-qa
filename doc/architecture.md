@@ -1,136 +1,181 @@
 # BiYou 本地知识库问答系统 —— 架构设计文档
 
-本文档详细说明 BiYou 本地 RAG（检索增强生成）问答系统的整体架构、核心设计原理、数据流动路线及技术选型。
+本文档详细说明 BiYou 本地 Agentic RAG 问答系统的**服务端总体分层架构**与**基于 LangGraph 的 Agentic RAG 双层图状态机架构**。
 
 ---
 
-## 1. 系统总体架构
+## 1. 服务端总体 DDD 分层架构图
 
-BiYou 采用前后端分离架构。前端基于 React + TypeScript + Vanilla CSS 构建，后端基于 Python FastAPI + LanceDB + SQLite 构建。系统具备完全脱离外部云端服务在本地单机独立运行的能力。
+服务端严格遵循 **DDD（领域驱动设计）** 原则，将核心业务规则与外部数据库、模型厂商、Web 框架彻底解耦，依赖方向自外向内单向依赖：
+
+```mermaid
+flowchart TB
+    subgraph Presentation_Layer ["1. 表现层 (Presentation Layer - API & SSE)"]
+        API_KB["知识库路由<br/>(/api/v1/knowledge-bases)"]
+        API_Doc["文档路由<br/>(/api/v1/documents)"]
+        API_Chat["会话流式路由 (SSE)<br/>(/api/v1/conversations/.../stream)"]
+        API_Settings["设置路由<br/>(/api/v1/settings)"]
+        API_Diag["诊断探针路由<br/>(/api/v1/diagnostics)"]
+    end
+
+    subgraph Application_Layer ["2. 应用服务层 (Application Layer - Use Cases)"]
+        Chat_Svc["ChatService<br/>(LangGraph 编排/流式驱动/事务持久化)"]
+        Doc_Svc["DocumentService<br/>(两阶段切分/异步向量化管道)"]
+        KB_Svc["KnowledgeBaseService<br/>(知识库生命周期/跨模块统计聚合)"]
+        Ret_Svc["RetrievalService<br/>(子块初筛搜索/父块大上下文回取)"]
+        Mem_Svc["MemoryService<br/>(显式长期记忆提取/去重更新)"]
+        Set_Svc["SettingsService<br/>(模型热加载/运行期参数持久化)"]
+        Diag_Svc["DiagnosticsService<br/>(链路探针/反馈审计统计)"]
+    end
+
+    subgraph Domain_Layer ["3. 核心领域层 (Domain Layer - Pure Business & Ports)"]
+        subgraph Chat_Domain ["Chat 领域"]
+            Chat_State["领域状态机<br/>(ConversationState / AgentSubGraphState)"]
+            Chat_Nodes["领域节点与路由<br/>(summarize, rewrite, orchestrator, aggregate)"]
+            Chat_Tools["检索领域工具<br/>(create_retrieval_tools)"]
+            Chat_Port["端口协议<br/>(ConversationRepository / LlmProvider)"]
+        end
+        subgraph Doc_Domain ["Documents 领域"]
+            Doc_Models["文档实体与分块<br/>(Document / TextChunk / ChunkKind)"]
+            Doc_Port["端口协议<br/>(DocumentRepository / DocumentStorage)"]
+        end
+        subgraph Ret_Domain ["Retrieval 领域"]
+            Ret_Models["检索模型与命中<br/>(ChildChunkItem / ParentChunkDetail)"]
+            Ret_Port["端口协议<br/>(VectorStore / EmbeddingProvider)"]
+        end
+        subgraph KB_Domain ["KnowledgeBase 领域"]
+            KB_Models["知识库实体<br/>(KnowledgeBase / Metrics)"]
+            KB_Port["端口协议<br/>(KnowledgeBaseRepository)"]
+        end
+        subgraph Mem_Domain ["Memory 领域"]
+            Mem_Models["记忆实体与提取纯函数<br/>(Memory / extract_explicit_memory)"]
+            Mem_Port["端口协议<br/>(MemoryRepository)"]
+        end
+    end
+
+    subgraph Infrastructure_Layer ["4. 基础设施层 (Infrastructure Layer - Adapters & Storage)"]
+        Repo_SQLite["SQLite Repositories<br/>(SqliteConversationRepo / SqliteDocRepo / SqliteKBRepo)"]
+        Store_LanceDB["LanceDB Vector Store<br/>(本地高性能嵌入式向量索引)"]
+        Storage_Disk["Local Document Storage<br/>(本地磁盘文件存储)"]
+        Migration_Tool["Migration Tools<br/>(数据库与向量迁移工具)"]
+    end
+
+    subgraph Providers_Layer ["5. 外部能力适配层 (Providers Layer)"]
+        LLM_Adapter["LangChain ChatModel Provider<br/>(SiliconFlow / DeepSeek / Ollama / OpenAI)"]
+        Embed_Adapter["FastEmbed Provider<br/>(BAAI/bge-small-zh-v1.5)"]
+        Chunker_Adapter["ParentChildTextChunker<br/>(Markdown 标题树感知 + 小块合并切分)"]
+    end
+
+    Presentation_Layer --> Application_Layer
+    Application_Layer --> Domain_Layer
+    Application_Layer --> Providers_Layer
+    Infrastructure_Layer -.->|实现端口协议| Domain_Layer
+    Providers_Layer -.->|实现能力协议| Domain_Layer
+```
+
+---
+
+## 2. LLM Chat 的 Agentic RAG 双层图状态机架构图
+
+BiYou 借鉴并融合了 `agentic-rag-for-dummies` 的核心思想，使用 **LangGraph SDK** 构筑了具备**意图拆解重写、两阶段多步工具调用研究循环、动态上下文压缩、超预算降级兜底及最终多路归纳**的双层状态机。
 
 ```mermaid
 flowchart TD
-    subgraph Frontend ["前端 (Web UI)"]
-        UI_Overview["概览仪表盘 (/overview)"]
-        UI_KB["知识库管理 (/knowledge-bases)"]
-        UI_Chat["智能问答 (/chat)"]
-        UI_Analytics["链路追踪 (/analytics)"]
-        UI_Diag["系统诊断 (/diagnostics)"]
-        UI_Settings["系统设置 (/settings)"]
+    %% 主图流转
+    subgraph Main_Graph ["主图：ConversationState (会话主生命周期)"]
+        Start([用户提问进入]) --> Node_Summ["1. summarize_history<br/>(滑动窗口超限历史自动摘要)"]
+        Node_Summ --> Node_Rewrite["2. rewrite_query<br/>(大模型结构化输出 QueryAnalysis)"]
+        
+        Node_Rewrite --> Cond_Clear{"问题表意是否清晰？<br/>(is_clear)"}
+        
+        %% 澄清分支
+        Cond_Clear -- "否 (is_clear=False)" --> Node_Clarify["3. request_clarification<br/>(生成澄清追问并触发 Checkpoint 中断)"]
+        Node_Clarify --> End_Clarify([挂起等待用户澄清])
+
+        %% Map-Reduce 扇出
+        Cond_Clear -- "是 (is_clear=True)" --> Send_Agent["4. Send('agent', ...)<br/>(Map-Reduce 并发扇出 1~3 个检索子问题)"]
     end
 
-    subgraph Backend_API ["后端 API 层 (FastAPI / REST & SSE)"]
-        API_KB["/api/v1/knowledge-bases"]
-        API_Chat["/api/v1/conversations"]
-        API_Diag["/api/v1/diagnostics"]
-        API_Settings["/api/v1/settings"]
+    %% 子图流转
+    subgraph Agent_SubGraph ["研究子图：AgentSubGraphState (多步工具研究循环)"]
+        Send_Agent --> Sub_Orch["5. orchestrator (Agent 编排节点)<br/>(首轮强制触发初筛，依据证据决策下一步)"]
+        
+        Sub_Orch --> Cond_Orch{"编排器输出决策"}
+        
+        %% 工具调用分支
+        Cond_Orch -- "调用工具 (tool_calls)" --> Sub_Tools["6. 两阶段检索工具执行"]
+        
+        subgraph Tool_Execution ["两阶段检索工具 (create_retrieval_tools)"]
+            Tool_Search["search_child_chunks<br/>(第一阶段：向量相似度初筛，返回子块与 Parent ID)"]
+            Tool_Parent["retrieve_parent_chunks<br/>(第二阶段：根据 Parent ID 获取完整父块大段落)"]
+        end
+        
+        Sub_Tools --> Tool_Search
+        Sub_Tools --> Tool_Parent
+        
+        Tool_Search --> Sub_Record["记录已检索 query 与 parent_id<br/>(retrieval_keys 集合，防止重复调用)"]
+        Tool_Parent --> Sub_Record
+        Sub_Record --> Cond_Budget{"Token 是否增长过快？<br/>(估算 > 3000 Token)"}
+        
+        Cond_Budget -- "是" --> Sub_Compress["7. compress_context<br/>(动态提炼当前研究事实，压缩上下文)"]
+        Cond_Budget -- "否" --> Sub_Orch
+        Sub_Compress --> Sub_Orch
+        
+        %% 降级兜底分支
+        Cond_Orch -- "超出预算/轮次超限 (iteration>=5)" --> Sub_Fallback["8. fallback_response<br/>(根据已有检索证据强制总结，防止死循环)"]
+        
+        %% 完成子问题回答
+        Cond_Orch -- "证据充分/无工具调用" --> Sub_Collect["9. collect_answer<br/>(输出当前子问题的独立回答与来源)"]
+        Sub_Fallback --> Sub_Collect
     end
 
-    subgraph Core_Services ["核心业务服务层"]
-        KB_Svc["KnowledgeBaseService"]
-        Doc_Svc["DocumentService"]
-        Ret_Svc["RetrievalService"]
-        Chat_Svc["ChatService"]
-        Mem_Svc["MemoryService"]
-        Diag_Svc["DiagnosticsService"]
-        Set_Svc["SettingsService"]
+    %% 主图汇总
+    subgraph Main_Aggregate ["主图：结果归纳与事件推送"]
+        Sub_Collect --> Node_Agg["10. aggregate_answers<br/>(综合所有子问题的回答与引用，输出最终答案)"]
+        Node_Agg --> SSE_Push["11. SSE 流式分发<br/>(event: delta / meta / done / error)"]
+        SSE_Push --> Commit_Turn["12. ChatService 事务提交<br/>(持久化 ChatMessage 与 Citation)"]
+        Commit_Turn --> End_Done([完成本轮对话])
     end
-
-    subgraph Providers ["Provider 引擎层"]
-        Chunker["ParentChildTextChunker (切片器)"]
-        Embedder["FastEmbedEmbeddingProvider (向量化)"]
-        LLM_Factory["LlmProviderFactory (LangChain/Ollama/OpenAI)"]
-        Router["QueryRouter & LlmIntentClassifier (路由)"]
-    end
-
-    subgraph Persistence ["持久化与存储层"]
-        DB[(SQLite biyou.db)]
-        VectorDB[(LanceDB 向量索引)]
-        DiskStorage[(本地文件存储 /data/documents)]
-    end
-
-    Frontend --> Backend_API
-    Backend_API --> Core_Services
-    Core_Services --> Providers
-    Core_Services --> Persistence
-    Providers --> Persistence
 ```
 
 ---
 
-## 2. 核心模块职责分工
+## 3. 关键架构设计与运行机制详解
 
-### 前端分工 (`frontend/src/features/`)
-```text
-src/
-├── app/                 # 路由 (router.tsx) 与应用装配
-├── components/          # 跨功能复用 UI 组件 (Icon, Navigation, AppShell)
-├── features/
-│   ├── overview/        # 概览仪表盘 (OverviewPage.tsx, overview.css)
-│   ├── knowledge-base/  # 知识库与文档管理
-│   ├── chat/            # 问答、打字机流式呈现与高亮引用
-│   ├── analytics/       # RAG 检索 Trace 链路追溯
-│   ├── diagnostics/     # 探针检测、反馈统计与审计日志
-│   └── settings/        # LLM / Embedding 运行期配置与连通性测试
-└── shared/              # API 统一请求客户端与共享 Hooks
-```
+### 3.1 两阶段切分与按需检索（Two-Stage Parent-Child Retrieval）
+- **切分阶段 (`ParentChildTextChunker`)**：
+  1. 使用 `MarkdownHeaderTextSplitter` 提取天然章节树；
+  2. 自动合并过小父块（`_merge_small_parents`，将碎片合并并更新标题路径 `章节1 -> 章节2`）；
+  3. 递归切分子块（`RecursiveCharacterTextSplitter`，500 字符，50 字符重叠），子块携带 `parent_id`。
+- **检索阶段 (`create_retrieval_tools`)**：
+  1. **第一阶段初筛 (`search_child_chunks`)**：基于 LanceDB 向量计算，快速检索出语义最匹配的细粒度 Child 片段，返回概要、相似度与 `parent_id`；
+  2. **第二阶段大上下文获取 (`retrieve_parent_chunks`)**：Agent 根据初筛线索，按需调取完整的 Parent 章节段落，彻底消除断章取义。
 
-### 后端分工 (`backend/app/`)
-```text
-app/
-├── api/                 # 参数校验、HTTP/SSE 协议转换与路由
-├── core/                # 配置 (config.py)、日志 (logging.py)
-├── middleware/          # X-Trace-ID 追踪中间件 (trace.py)
-├── infrastructure/      # 数据持久化实现 (SQLite Repositories, LanceDB Store)
-├── modules/             # 领域业务用例 (chat, knowledge_bases, retrieval 等)
-└── providers/           # LLM、Embedding、Chunking 插件化实现
-```
+### 3.2 自适应查询分析与 Map-Reduce 扇出（Query Analysis & Map-Reduce）
+- 在 `rewrite_query` 节点中，利用大模型的结构化输出能力（`with_structured_output(QueryAnalysis)`）：
+  - **模糊代词识别**：若提问严重缺失主语或指代不明（如“那个怎么用”），标记 `is_clear=False` 并给出澄清反问，触发 LangGraph 的 Checkpoint 中断，等待用户补充说明；
+  - **复杂问题拆解**：若问题清晰，自动将其重写并分解为 1~3 个相互独立的子问题，通过 LangGraph 的 `Send("agent", ...)` 并发分发给子图 Agent 进行独立研究。
+
+### 3.3 工具循环治理与动态压缩（Loop Safety & Context Compression）
+- **防死循环与去重**：子图维护 `retrieval_keys: Annotated[set[str], set_union]` 状态，记录已执行过的检索词和已获取的父块 ID，禁止重复调取。
+- **动态上下文压缩 (`compress_context`)**：当检索证据累计导致 Token 估算超出阈值时，自动触发压缩节点，提取事实、过滤工具冗余，将上下文提炼至 300~600 字结构化摘要后继续研究。
+- **硬限制降级 (`fallback_response`)**：当迭代轮次达 5 次或工具调用达 8 次时，平滑降级至兜底归纳节点，避免大模型陷入死循环。
+
+### 3.4 最终归纳与平滑流式推送（Aggregation & SSE Streaming）
+- 所有子问题的研究结果汇总至 `aggregate_answers`，提炼连贯答案并严格按格式附加 `来源：\n- 文件名.ext`。
+- `ChatService` 监听 LangGraph 产生的实时更新，通过标准 Server-Sent Events（SSE）将打字机文本（`delta`）、思考状态、引用来源（`Citation`）即时推送到前端界面。
 
 ---
 
-## 3. Key Architectural Designs (核心设计特色)
+## 4. 技术栈总览
 
-### 3.1 Parent / Child 双层切片与高精度召回
-为了同时兼顾**向量检索精度**与**生成上下文完整度**，系统采用了 Parent/Child 策略：
-- **Child Chunk (小切片，256 字符)**：粒度小、语义集中，经 FastEmbed 向量化后写入 LanceDB 索引，用于快速高分召回。
-- **Parent Chunk (大地块，1024 字符)**：保存完整的章节段落与上下文。召回 Child 后，自动聚合提取其关联的 Parent Chunk 内容送入 LLM 上下文，彻底解决传统单层切片断章取义的问题。
-
-### 3.2 动态查询路由与意图识别 (`QueryRouter` & `LlmIntentClassifier`)
-并不是所有对话都需要触发向量检索。为了避免检索无关文档干扰回答并降低系统延时，系统内置了两级查询路由机制：
-1. **规则快速判定**：优先通过确定性正则/关键词识别日常寒暄（如“你好”、“谢谢”）或显式记忆保存指令（如“记住：...”），直接分发路由。
-2. **LLM 意图分类与改写**：复杂对话交由 `LlmIntentClassifier` 进行分类，精准划分为以下 4 种意图：
-   - `KNOWLEDGE`（知识库检索）：自动触发 RAG 检索，结合多轮历史执行 Query 改写，并挂载高亮引用角标。
-   - `GENERAL`（通用闲聊）：直接调用 LLM 问答，同时自动注入用户的长期记忆上下文。
-   - `CLARIFICATION`（缺少上下文）：主动生成追问提示，引导用户补充明确对象或完整问题。
-   - `MEMORY_CONFIRMATION`（记忆确认）：提示用户格式，引导触发“记住：...”长期记忆持久化。
-
-### 3.3 长期记忆提取与系统提示词注入 (`MemoryService` & `MemoryExtractor`)
-系统具备轻量级长期记忆能力，帮助 AI 建立跨会话的个性化用户画像：
-1. **记忆提取 (`MemoryExtractor`)**：当用户在对话中发送“记住：我是前端工程师”或“记录：常用技术栈是 Python 和 TS”时，系统自动抽取键值对。
-2. **隔离持久化**：长期记忆安全存储于 SQLite `memories` 独立数据表中，避免与临时的聊天历史生命周期耦合。
-3. **上下文动态注入**：在后续执行 `GENERAL` 通用问答时，`ChatService` 自动检索当前匹配的记忆列表，并将其作为 `memories` 上下文动态注入到 LLM 系统 Prompt 中，使 AI 回答能够准确识别用户的个人偏好与身份背景。
-
-### 3.4 运行期 LLM 引擎热加载与持久化
-用户在「设置」页面更改大模型 Provider（如由 Ollama 切换为 DeepSeek / SiliconFlow）或模型名称时：
-1. `SettingsService` 通过 `LlmProviderFactory` 实时重新生成 `LlmProvider` 实例。
-2. 动态注入更新 `ChatService` 实例，**无需重启 Backend 进程即可秒级生效**。
-3. 自动同步重写落盘至后端 `.env` 文件，确保服务重启后新配置持续有效。
-
-### 3.5 审计日志与脱敏快照机制 (`feedback_audit_logs`)
-- **敏感信息保护**：日志中严格脱敏，不记录完整的用户 Key、密钥及用户私密正文。
-- **数据快照持久化**：用户评价点赞 (👍)、点踩 (👎) 及重新生成事件，除记录在会话记录外，会同步写入独立的 `feedback_audit_logs` 快照表（无级联删除约束）。即使前端清空聊天历史，后台诊断的 AI 回答质量统计指标依然准确完整。
-
----
-
-## 4. 技术选型一览
-
-| 模块 | 技术选型 | 选用原因 |
+| 分层 | 核心技术选型 | 作用与优势 |
 | :--- | :--- | :--- |
-| 前端框架 | React 18 + TypeScript + Vite | 快速热更新、强类型约束、轻量敏捷 |
-| 前端样式 | Vanilla CSS (CSS Variables + BEM) | 灵活控制、零依赖、无缝支持深浅色主题 |
-| 后端 API | Python 3.12 + FastAPI + Uvicorn | 异步高性能、内置 SSE 流式响应与 OpenAPI |
-| 包管理 | `uv` | 比 Poetry/Pipenv 更快速、确定性的依赖构建 |
-| 关系型数据库 | SQLite 3 (aiosqlite) | 单机零配置、轻量级持久化 |
-| 向量数据库 | LanceDB | 嵌入式高性能向量存储，支持 Columnar 格式与快速检索 |
-| Embedding 引擎 | FastEmbed (BAAI/bge-small-zh-v1.5) | 本地 CPU 高效运行，无需依赖外部 API |
-| LLM 抽象层 | LangChain + OpenAI API 兼容规范 | 支持接入 SiliconFlow、DeepSeek、Ollama 等任意标准模型 |
+| **状态机与编排** | `LangGraph` + `LangChain Core` | 双层图状态机、Map-Reduce 扇出、Checkpoint 挂起中断与循环治理 |
+| **后端框架** | Python 3.12 + `FastAPI` + `Uvicorn` | 异步高性能、原生支持异步流式 SSE 与 OpenAPI 规范 |
+| **包管理** | `uv` | 高性能、确定性构建的 Python 依赖管理工具 |
+| **关系型持久化** | `SQLite 3` (`aiosqlite`) | 单机零部署、轻量可靠的事务性关系数据存储 |
+| **向量数据库** | `LanceDB` | 嵌入式高性能向量数据库，支持 Columnar 格式与毫秒级向量初筛 |
+| **Embedding 引擎**| `FastEmbed` (`bge-small-zh-v1.5`) | 本地 CPU 高效运行，无需外部网络依赖 |
+| **文档智能切分** | `MarkdownHeaderTextSplitter` + `RecursiveSplitter` | Markdown 标题感知 + 自适应小块合并 + 两阶段父子映射 |
+| **前端应用** | React 18 + TypeScript + Vanilla CSS | 模块化设计、极速响应、无缝深色模式与流式打字机高亮渲染 |

@@ -6,7 +6,7 @@
 import os
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -126,7 +126,7 @@ class DiagnosticsService:
 
         return SystemHealthResponse(
             overall_status=overall,
-            checked_at=datetime.now(timezone.utc),
+            checked_at=datetime.now(UTC),
             components=components,
         )
 
@@ -286,7 +286,7 @@ class DiagnosticsService:
                     )
                     rows = cursor.fetchall()
                     for row in rows:
-                        dt = datetime.fromisoformat(row[8]) if isinstance(row[8], str) else datetime.now(timezone.utc)
+                        dt = datetime.fromisoformat(row[8]) if isinstance(row[8], str) else datetime.now(UTC)
                         raw_chunks = row[10]
                         recalled_chunks: list[RecalledChunkDetail] = []
                         if raw_chunks:

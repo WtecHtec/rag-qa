@@ -26,3 +26,6 @@ logs/
 **/*.test.ts
 **/__init__.py
 prototype
+prd.md
+.agents
+agentic-rag-for-dummies
